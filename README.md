@@ -1,0 +1,381 @@
+# Telegram Codex Remote Control
+
+`telegram-codex-remote-control` 是一个基于 Node.js 和 TypeScript 的 Telegram 机器人服务，用来把 Codex 会话暴露到 Telegram 私聊里。你可以直接在 Telegram 中发送文本、图片或文件，让 Codex 在指定工作目录中执行任务，并把生成的图片或文件自动回传到聊天窗口。
+
+这个项目适合下面几类场景：
+
+- 在手机上远程查看和修改代码
+- 远程运行 Codex 做文档整理、排查、代码生成或文件处理
+- 把 Telegram 当作一个轻量的 Codex 控制面板
+
+## 项目能做什么
+
+- 只允许指定的 Telegram 用户在私聊中访问
+- 支持直接发送文本任务给 Codex
+- 支持发送图片和文件，附带说明作为提示词
+- 自动把附件下载到临时目录，再交给 Codex 使用
+- 自动监听当前工作目录下的 `.relay-out`，把新增或更新的文件回传到 Telegram
+- 保存 Codex 线程 ID 和当前工作目录，支持重启后继续已有会话
+- 提供 `/status`、`/pwd`、`/cd`、`/stop`、`/reset` 等控制命令
+
+## 工作方式
+
+服务启动后会做三件事：
+
+1. 启动 Telegram Bot 轮询。
+2. 接收来自白名单用户的私聊消息、图片和文件。
+3. 把消息转成 Codex 输入，并在当前工作目录中启动或恢复一个 Codex 线程。
+
+每次任务执行时，服务会：
+
+- 把 Telegram 附件保存到 `data/tmp/<run-id>/input`
+- 把当前工作目录下的 `.relay-out` 作为回传目录
+- 将 `If you need to return images or files to Telegram, place copies under: <exportDir>` 追加到提示中
+- 实时把 Codex 输出、状态和命令执行摘要同步回 Telegram
+- 在任务结束后扫描 `.relay-out`，把新生成或被更新的文件发回聊天窗口
+
+## 项目结构
+
+```text
+.
+├─ config/
+│  ├─ relay.config.example.json
+│  └─ relay.config.docker.example.json
+├─ docker/
+│  ├─ Dockerfile
+│  ├─ docker-compose.example.yml
+│  └─ entrypoint.sh
+├─ scripts/
+│  └─ build-native.mjs
+├─ src/
+│  ├─ index.ts
+│  ├─ service.ts
+│  ├─ telegram.ts
+│  ├─ codex.ts
+│  ├─ attachments.ts
+│  ├─ state.ts
+│  ├─ config.ts
+│  ├─ renderer.ts
+│  └─ types.ts
+├─ .env.example
+├─ package.json
+└─ tsconfig.json
+```
+
+## 环境要求
+
+- Node.js 20 或更高版本
+- npm
+- 一个可用的 Telegram Bot Token
+- 一个允许调用 Codex 的 OpenAI API Key 或兼容代理 Key
+
+如果你使用 Docker，则本地只需要：
+
+- Docker
+- Docker Compose
+
+## 配置
+
+项目配置分成两部分：
+
+- `.env`：敏感信息和身份信息
+- `config/relay.config.json`：运行目录、模型、沙箱和网络策略
+
+### 1. 环境变量
+
+从 `.env.example` 复制为 `.env`：
+
+```bash
+cp .env.example .env
+```
+
+Windows PowerShell 可用：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+示例：
+
+```env
+TELEGRAM_BOT_TOKEN=123456:telegram-token
+ALLOWED_TELEGRAM_USER_ID=123456789
+OPENAI_API_KEY=sk-...
+```
+
+字段说明：
+
+- `TELEGRAM_BOT_TOKEN`：Telegram 机器人令牌
+- `ALLOWED_TELEGRAM_USER_ID`：允许访问机器人的 Telegram 数字用户 ID，只允许该用户私聊使用
+- `OPENAI_API_KEY`：传给 Codex SDK 的 API Key
+
+### 2. 运行配置
+
+把 `config/relay.config.example.json` 复制为 `config/relay.config.json`：
+
+```bash
+cp config/relay.config.example.json config/relay.config.json
+```
+
+Windows PowerShell 可用：
+
+```powershell
+Copy-Item config/relay.config.example.json config/relay.config.json
+```
+
+示例：
+
+```json
+{
+  "defaultCwd": "D:/LD",
+  "dataDir": "./data",
+  "tempDir": "./data/tmp",
+  "stateFile": "./data/state.json",
+  "codexHome": "./data/codex-home",
+  "telegram": {
+    "pollTimeoutSeconds": 10
+  },
+  "codex": {
+    "baseUrl": "https://api.openai.com/v1",
+    "provider": {
+      "id": "relay_proxy",
+      "name": "Relay Proxy",
+      "envKey": "OPENAI_API_KEY",
+      "wireApi": "responses",
+      "supportsWebsockets": false
+    },
+    "model": "gpt-5.4",
+    "reasoningEffort": "medium",
+    "approvalPolicy": "never",
+    "sandboxMode": "danger-full-access",
+    "skipGitRepoCheck": true,
+    "networkAccessEnabled": true
+  }
+}
+```
+
+主要字段说明：
+
+- `defaultCwd`：默认工作目录。支持绝对路径，也支持相对 `appRoot` 的路径
+- `dataDir`：运行时数据目录
+- `tempDir`：附件暂存目录
+- `stateFile`：服务状态文件，保存当前目录和线程 ID
+- `codexHome`：传给 Codex 进程的 `CODEX_HOME`
+- `telegram.pollTimeoutSeconds`：Telegram 长轮询超时
+- `codex.baseUrl`：可选，自定义 OpenAI 兼容接口地址；不填时使用官方默认地址
+- `codex.provider`：可选，只有在配置了 `baseUrl` 时才有意义，用于声明自定义 provider
+- `codex.model`：使用的模型名
+- `codex.reasoningEffort`：推理强度，可选值为 `minimal`、`low`、`medium`、`high`、`xhigh`
+- `codex.approvalPolicy`：审批策略
+- `codex.sandboxMode`：沙箱模式
+- `codex.skipGitRepoCheck`：是否跳过 Git 仓库检查
+- `codex.networkAccessEnabled`：是否允许网络访问
+
+## 本地开发与运行
+
+### 安装依赖
+
+```bash
+npm install
+```
+
+### 开发模式
+
+```bash
+npm run dev
+```
+
+这会直接用 `tsx` 运行 `src/index.ts`。
+
+### 构建
+
+```bash
+npm run build
+```
+
+构建产物输出到 `dist/`。
+
+### 生产运行
+
+```bash
+npm start
+```
+
+## Docker 部署
+
+### 构建镜像
+
+```bash
+npm run package:docker
+```
+
+或直接：
+
+```bash
+docker build -f docker/Dockerfile -t telegram-codex-remote-control:local .
+```
+
+### 使用 docker-compose
+
+1. 进入 `docker/` 目录。
+2. 将 `docker-compose.example.yml` 复制为你自己的 `docker-compose.yml`。
+3. 准备同目录下的 `.env`，至少包含：
+
+```env
+TELEGRAM_BOT_TOKEN=...
+ALLOWED_TELEGRAM_USER_ID=...
+OPENAI_API_KEY=...
+WORKSPACE_HOST_PATH=D:/LD
+```
+
+4. 准备 `docker/config/relay.config.json`，可参考 `config/relay.config.docker.example.json`。
+5. 启动：
+
+```bash
+docker compose up -d --build
+```
+
+默认挂载关系：
+
+- `./config -> /app/config`
+- `./data -> /app/data`
+- `${WORKSPACE_HOST_PATH} -> /workspace`
+
+Docker 示例配置中，`defaultCwd` 默认应设置为 `/workspace`。
+
+## 原生打包
+
+项目支持生成带 Codex 运行时 sidecar 的原生发布目录。
+
+### 仅生成打包前 bundle
+
+```bash
+npm run bundle:sea
+```
+
+### 生成原生发布包
+
+```bash
+npm run package:native
+```
+
+输出目录为：
+
+```text
+release/<platform>/
+```
+
+其中通常会包含：
+
+- 可执行文件
+- `app.mjs`
+- `runtime/codex/`
+- `config/relay.config.example.json`
+- `.env.example`
+
+说明：
+
+- 这里不是单一二进制分发，而是“可执行文件 + JS bundle + Codex runtime”的发布目录
+- 打包脚本依赖 `@openai/codex-sdk` 拉下来的平台 sidecar
+
+## Telegram 使用说明
+
+### 直接发送文本
+
+直接给机器人发一段文本，服务会把这段文本作为 Codex 任务输入。
+
+示例：
+
+```text
+帮我查看当前目录下有哪些 Node 项目，并整理成表格
+```
+
+### 发送图片或文件
+
+- 图片消息：会作为图片附件传给 Codex
+- 文档消息：会保存为本地文件后传给 Codex
+- Caption：会作为该次任务的文本提示
+
+如果没有填写 Caption：
+
+- 图片默认提示为 `Analyze this image.`
+- 文件默认提示为 `Inspect this file.`
+
+### 可用命令
+
+- `/status`：查看当前状态、工作目录、线程状态、模型和沙箱配置
+- `/pwd`：查看当前工作目录
+- `/cd <path>`：切换工作目录，并重置当前 Codex 线程
+- `/stop`：中止当前正在运行的任务
+- `/reset`：清空当前线程，下一个任务会创建新会话
+
+### 产物回传规则
+
+服务不会自动抓取任意路径下的文件，只会扫描当前工作目录的 `.relay-out`。
+
+如果希望让生成的图片或文件自动回到 Telegram，需要让 Codex 把文件复制到：
+
+```text
+<当前工作目录>/.relay-out
+```
+
+服务只会发送该目录中“本次任务新增或被修改”的文件。
+
+## 状态与恢复
+
+服务会把状态保存到 `stateFile` 指定的位置，主要包括：
+
+- 当前工作目录
+- 当前 Codex 线程 ID
+- 恢复状态
+- 是否有未正常结束的任务
+
+服务重启后会尝试恢复线程。如果保存的线程不存在，则会自动回退为新线程继续工作。
+
+## 故障排查
+
+### 启动时报配置错误
+
+优先检查：
+
+- `.env` 是否存在
+- `config/relay.config.json` 是否存在
+- `defaultCwd` 指向的目录是否真实存在
+- `baseUrl` 是否为合法的绝对 URL
+- `provider` 是否与 `baseUrl` 一起配置
+
+### 启动失败日志
+
+启动阶段的致命错误会写入：
+
+```text
+startup-error.log
+```
+
+该文件位于应用根目录。
+
+### 机器人没有响应
+
+检查下面几项：
+
+- 你是不是在私聊里使用机器人
+- 发送消息的用户 ID 是否等于 `ALLOWED_TELEGRAM_USER_ID`
+- `TELEGRAM_BOT_TOKEN` 是否正确
+- 当前是否已有任务在运行中
+
+## 安全注意事项
+
+- 当前示例配置使用的是 `danger-full-access`
+- 当前示例配置启用了网络访问
+- 当前示例配置允许 Codex 在目标工作目录内进行真实读写
+
+如果你要把它部署到长期运行环境，建议至少重新评估：
+
+- `sandboxMode`
+- `approvalPolicy`
+- `networkAccessEnabled`
+- `defaultCwd` 的权限边界
+
+## 许可证
+
+本项目采用 [MIT License](./LICENSE) 开源。

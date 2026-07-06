@@ -1,0 +1,26 @@
+{
+  "defaultCwd": "/workspace",
+  "dataDir": "./data",
+  "tempDir": "./data/tmp",
+  "stateFile": "./data/state.json",
+  "codexHome": "./data/codex-home",
+  "telegram": {
+    "pollTimeoutSeconds": 10
+  },
+  "codex": {
+    "baseUrl": "https://api.openai.com/v1",
+    "provider": {
+      "id": "relay_proxy",
+      "name": "Relay Proxy",
+      "envKey": "OPENAI_API_KEY",
+      "wireApi": "responses",
+      "supportsWebsockets": false
+    },
+    "model": "gpt-5.4",
+    "reasoningEffort": "medium",
+    "approvalPolicy": "never",
+    "sandboxMode": "danger-full-access",
+    "skipGitRepoCheck": true,
+    "networkAccessEnabled": true
+  }
+}
