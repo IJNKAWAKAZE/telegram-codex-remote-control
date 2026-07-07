@@ -1,11 +1,11 @@
 import { existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { basename, resolve } from "node:path";
-import type { ChatAdapter, IncomingAttachment, RelayConfig, ServiceState } from "./types.js";
+import type { ChatAdapter, ChatInlineKeyboardMarkup, IncomingAttachment, RelayConfig, ServiceState, SessionHistoryEntry } from "./types.js";
 import { AttachmentStore } from "./attachments.js";
 import { CodexSessionManager } from "./codex.js";
 import { renderBodyChunks, renderStatusMessage } from "./renderer.js";
-import { FileStateStore } from "./state.js";
+import { FileStateStore, SESSION_HISTORY_LIMIT } from "./state.js";
 import { TelegramGateway } from "./telegram.js";
 
 const STATUS_HISTORY_LIMIT = 6;
@@ -25,11 +25,13 @@ export class RemoteControlService {
     this.telegram = new TelegramGateway(config, {
       onText: (adapter, text) => this.handleText(adapter, text),
       onCommand: (adapter, text) => this.handleCommand(adapter, text),
-      onAttachment: (adapter, attachment) => this.handleAttachment(adapter, attachment)
+      onAttachment: (adapter, attachment) => this.handleAttachment(adapter, attachment),
+      onCallback: (adapter, data, messageId) => this.handleCallback(adapter, data, messageId)
     });
   }
 
   async start() {
+    await this.stateStore.ensureCurrentThreadTracked();
     const state = await this.stateStore.load();
     let nextState: ServiceState | null = null;
 
@@ -97,75 +99,169 @@ export class RemoteControlService {
         await adapter.sendHtml(`<code>${escapeHtml(state.currentCwd)}</code>`);
         return;
       }
+      case "/sessions": {
+        const state = await this.stateStore.load();
+        if (state.activeRun) {
+          await adapter.sendHtml("任务运行中，无法管理历史会话。");
+          return;
+        }
+        await this.sendSessionPicker(adapter);
+        return;
+      }
       case "/stop": {
         if (!this.codex.isRunning()) {
-          await adapter.sendHtml("No task is currently running.");
+          await adapter.sendHtml("当前没有正在运行的任务。");
           return;
         }
         await this.codex.stopActiveTurn();
-        await adapter.sendHtml("Stop requested.");
+        await adapter.sendHtml("已发送停止请求。");
         return;
       }
+      case "/new":
       case "/reset": {
         if (this.codex.isRunning()) {
-          await adapter.sendHtml("Cannot reset while a task is running.");
+          await adapter.sendHtml("任务运行中，无法新建会话。");
           return;
         }
         await this.codex.resetThread();
-        await adapter.sendHtml("Session reset. The next task will start a fresh Codex thread.");
+        await adapter.sendHtml("已切换为新会话。下一次任务会启动新的 Codex 线程。");
         return;
       }
       case "/cd": {
         if (!argument) {
-          await adapter.sendHtml("Usage: <code>/cd &lt;path&gt;</code>");
+          await adapter.sendHtml("用法：<code>/cd &lt;路径&gt;</code>");
           return;
         }
         if (this.codex.isRunning()) {
-          await adapter.sendHtml("Cannot change directory while a task is running.");
+          await adapter.sendHtml("任务运行中，无法切换目录。");
           return;
         }
         const nextPath = resolve((await this.stateStore.load()).currentCwd, argument);
         if (!existsSync(nextPath)) {
-          await adapter.sendHtml(`Path does not exist: <code>${escapeHtml(nextPath)}</code>`);
+          await adapter.sendHtml(`路径不存在：<code>${escapeHtml(nextPath)}</code>`);
           return;
         }
         const fileStat = await stat(nextPath);
         if (!fileStat.isDirectory()) {
-          await adapter.sendHtml(`Not a directory: <code>${escapeHtml(nextPath)}</code>`);
+          await adapter.sendHtml(`不是目录：<code>${escapeHtml(nextPath)}</code>`);
           return;
         }
         await this.codex.changeDirectory(nextPath);
         await adapter.sendHtml(
-          `Working directory changed to <code>${escapeHtml(nextPath)}</code>. The next task will start a fresh Codex thread.`
+          `工作目录已切换到 <code>${escapeHtml(nextPath)}</code>。下一次任务会启动新的 Codex 线程。`
         );
         return;
       }
       default: {
         await adapter.sendHtml(
-          "Supported commands: <code>/status</code>, <code>/pwd</code>, <code>/cd &lt;path&gt;</code>, <code>/stop</code>, <code>/reset</code>"
+          "支持的命令：<code>/status</code>、<code>/pwd</code>、<code>/cd &lt;路径&gt;</code>、<code>/stop</code>、<code>/new</code>、<code>/sessions</code>"
         );
+      }
+    }
+  }
+
+  private async handleCallback(adapter: ChatAdapter, data: string, messageId: number | null) {
+    if (!data.startsWith("session:")) {
+      await adapter.answerCallback();
+      return;
+    }
+
+    const state = await this.stateStore.load();
+    if (state.activeRun) {
+      await adapter.answerCallback("任务运行中，无法管理历史会话。");
+      return;
+    }
+
+    const [, action, sessionId] = data.split(":");
+    if (!action || !sessionId) {
+      await adapter.answerCallback("这个按钮已经失效。");
+      return;
+    }
+
+    switch (action) {
+      case "use": {
+        const session = await this.stateStore.findSessionById(sessionId);
+        if (!session) {
+          await adapter.answerCallback("会话不存在或已被删除。");
+          await this.refreshSessionPicker(adapter, messageId, "目标会话不存在或已被删除。");
+          return;
+        }
+
+        if (!existsSync(session.cwd)) {
+          await adapter.answerCallback("该会话的工作目录不存在。");
+          await this.refreshSessionPicker(
+            adapter,
+            messageId,
+            `无法切换到会话“${session.preview}”，因为目录不存在：${session.cwd}`
+          );
+          return;
+        }
+
+        const currentState = await this.stateStore.load();
+        if (currentState.threadId === session.threadId && currentState.currentCwd === session.cwd) {
+          await adapter.answerCallback("已经是当前会话。");
+          await this.refreshSessionPicker(adapter, messageId, `当前已经是会话“${session.preview}”。`);
+          return;
+        }
+
+        const activated = await this.stateStore.activateSession(sessionId);
+        if (!activated) {
+          await adapter.answerCallback("会话不存在或已被删除。");
+          await this.refreshSessionPicker(adapter, messageId, "目标会话不存在或已被删除。");
+          return;
+        }
+
+        await adapter.answerCallback("已切换会话。");
+        await this.refreshSessionPicker(
+          adapter,
+          messageId,
+          `已切换到会话“${activated.preview}”，工作目录为 ${activated.cwd}`
+        );
+        return;
+      }
+      case "delete": {
+        const deleted = await this.stateStore.deleteSession(sessionId);
+        if (!deleted) {
+          await adapter.answerCallback("会话不存在或已被删除。");
+          await this.refreshSessionPicker(adapter, messageId, "目标会话不存在或已被删除。");
+          return;
+        }
+
+        await adapter.answerCallback("已删除会话记录。");
+        await this.refreshSessionPicker(
+          adapter,
+          messageId,
+          deleted.isCurrentSession
+            ? `已删除当前会话“${deleted.entry.preview}”。下一次任务会新建会话。`
+            : `已删除会话“${deleted.entry.preview}”。`
+        );
+        return;
+      }
+      default: {
+        await adapter.answerCallback("这个按钮已经失效。");
       }
     }
   }
 
   private async renderStatus() {
     const state = await this.stateStore.load();
-    const mode = state.activeRun ? "running" : "idle";
-    const threadText = state.threadId ? state.threadId : "pending new thread";
+    const mode = state.activeRun ? "运行中" : "空闲";
+    const threadText = state.threadId ? state.threadId : "待创建新线程";
     return [
-      `<b>Status</b>`,
-      `<code>mode: ${escapeHtml(mode)}</code>`,
-      `<code>cwd: ${escapeHtml(state.currentCwd)}</code>`,
-      `<code>thread: ${escapeHtml(threadText)}</code>`,
-      `<code>recovery: ${escapeHtml(state.recoveryStatus)}</code>`,
-      `<code>base_url: ${escapeHtml(this.config.codex.baseUrl ?? "default (OpenAI official)")}</code>`,
-      `<code>provider: ${escapeHtml(renderProviderStatus(this.config))}</code>`,
-      `<code>model: ${escapeHtml(this.config.codex.model)}</code>`,
-      `<code>reasoning_effort: ${escapeHtml(this.config.codex.reasoningEffort ?? "default")}</code>`,
-      `<code>approval_policy: ${escapeHtml(this.config.codex.approvalPolicy)}</code>`,
-      `<code>sandbox_mode: ${escapeHtml(this.config.codex.sandboxMode)}</code>`,
-      `<code>network_access: ${this.config.codex.networkAccessEnabled ? "enabled" : "disabled"}</code>`,
-      `<code>previous_shutdown_had_active_task: ${state.previousShutdownHadActiveTask ? "yes" : "no"}</code>`
+      `<b>状态</b>`,
+      `<code>运行状态: ${escapeHtml(mode)}</code>`,
+      `<code>工作目录: ${escapeHtml(state.currentCwd)}</code>`,
+      `<code>线程: ${escapeHtml(threadText)}</code>`,
+      `<code>恢复状态: ${escapeHtml(formatRecoveryStatus(state.recoveryStatus))}</code>`,
+      `<code>接口地址: ${escapeHtml(this.config.codex.baseUrl ?? "默认（OpenAI 官方）")}</code>`,
+      `<code>提供方: ${escapeHtml(renderProviderStatus(this.config))}</code>`,
+      `<code>模型: ${escapeHtml(this.config.codex.model)}</code>`,
+      `<code>推理强度: ${escapeHtml(formatReasoningEffort(this.config.codex.reasoningEffort))}</code>`,
+      `<code>审批策略: ${escapeHtml(formatApprovalPolicy(this.config.codex.approvalPolicy))}</code>`,
+      `<code>沙箱模式: ${escapeHtml(formatSandboxMode(this.config.codex.sandboxMode))}</code>`,
+      `<code>网络访问: ${this.config.codex.networkAccessEnabled ? "已启用" : "已禁用"}</code>`,
+      `<code>历史会话: ${state.sessionHistory.length}/${SESSION_HISTORY_LIMIT}</code>`,
+      `<code>上次退出时有未完成任务: ${state.previousShutdownHadActiveTask ? "是" : "否"}</code>`
     ].join("\n");
   }
 
@@ -178,7 +274,7 @@ export class RemoteControlService {
   ) {
     const state = await this.stateStore.load();
     if (state.activeRun) {
-      await adapter.sendHtml("A task is already running. Use <code>/stop</code> first.");
+      await adapter.sendHtml("已有任务在运行，请先使用 <code>/stop</code>。");
       return;
     }
 
@@ -283,7 +379,7 @@ export class RemoteControlService {
 
     try {
       await startTypingHeartbeat();
-      await syncMessages("Running", true);
+      await syncMessages("运行中", true);
 
       const result = await this.codex.runTask({
         text,
@@ -308,16 +404,16 @@ export class RemoteControlService {
               }
             }
           }
-          await syncMessages("Running");
+          await syncMessages("运行中");
         }
       });
 
       stopTypingHeartbeat();
-      await syncMessages(result.stopped ? "Stopped" : "Completed", true);
+      await syncMessages(result.stopped ? "已停止" : "已完成", true);
 
       const artifacts = await this.attachmentStore.collectNewArtifacts(runDirs.exportDir, exportSnapshot);
       for (const artifact of artifacts) {
-        const caption = `Generated: <code>${escapeHtml(artifact.fileName)}</code>`;
+        const caption = `已生成文件：<code>${escapeHtml(artifact.fileName)}</code>`;
         if (artifact.kind === "image") {
           await adapter.sendPhoto(artifact.path, caption);
         } else {
@@ -327,7 +423,7 @@ export class RemoteControlService {
     } catch (error) {
       stopTypingHeartbeat();
       statusLines.push(error instanceof Error ? error.message : String(error));
-      await syncMessages("Failed", true);
+      await syncMessages("执行失败", true);
       console.error("[service] Task failed:", error);
     } finally {
       stopTypingHeartbeat();
@@ -338,6 +434,61 @@ export class RemoteControlService {
         previousShutdownHadActiveTask: false
       });
     }
+  }
+
+  private async sendSessionPicker(adapter: ChatAdapter, notice?: string) {
+    const { html, replyMarkup } = await this.renderSessionPicker(notice);
+    await adapter.sendHtml(html, replyMarkup ? { replyMarkup } : undefined);
+  }
+
+  private async refreshSessionPicker(adapter: ChatAdapter, messageId: number | null, notice?: string) {
+    const { html, replyMarkup } = await this.renderSessionPicker(notice);
+    const options = replyMarkup ? { replyMarkup } : undefined;
+    if (messageId === null) {
+      await adapter.sendHtml(html, options);
+      return;
+    }
+
+    await adapter.editHtml(messageId, html, options);
+  }
+
+  private async renderSessionPicker(notice?: string) {
+    const state = await this.stateStore.load();
+    const sessions = await this.stateStore.listRecentSessions();
+    const lines = [
+      "<b>最近会话</b>",
+      `<code>仅保留最近 ${SESSION_HISTORY_LIMIT} 条。点击左侧切换，右侧删除。</code>`
+    ];
+
+    if (notice) {
+      lines.push("", escapeHtml(notice));
+    }
+
+    if (!sessions.length) {
+      lines.push("", "暂无历史会话。");
+      return {
+        html: lines.join("\n"),
+        replyMarkup: { inline_keyboard: [] }
+      };
+    }
+
+    const replyMarkup: ChatInlineKeyboardMarkup = {
+      inline_keyboard: sessions.map((session) => [
+        {
+          text: formatSessionButtonLabel(session, state.threadId),
+          callback_data: `session:use:${session.id}`
+        },
+        {
+          text: "删除",
+          callback_data: `session:delete:${session.id}`
+        }
+      ])
+    };
+
+    return {
+      html: lines.join("\n"),
+      replyMarkup
+    };
   }
 }
 
@@ -355,16 +506,101 @@ function escapeHtml(value: string) {
 function renderProviderStatus(config: RelayConfig) {
   const provider = config.codex.provider;
   if (!provider) {
-    return config.codex.baseUrl ? "openai base_url override" : "default openai";
+    return config.codex.baseUrl ? "OpenAI 兼容接口覆写" : "默认 OpenAI";
   }
 
   const providerId = provider.id ?? "relay_proxy";
   const websocketStatus =
-    provider.supportsWebsockets === undefined ? "default websockets" : provider.supportsWebsockets ? "websockets on" : "https only";
+    provider.supportsWebsockets === undefined
+      ? "默认 WebSocket 设置"
+      : provider.supportsWebsockets
+        ? "WebSocket 已启用"
+        : "仅 HTTPS";
 
   return `${providerId} (${websocketStatus})`;
 }
 
 function summarizeCommand(command: string) {
   return command.length > 240 ? `${command.slice(0, 237)}...` : command;
+}
+
+function formatSessionButtonLabel(session: SessionHistoryEntry, currentThreadId: string | null) {
+  const time = formatSessionTime(session.lastUsedAt);
+  const cwdLabel = abbreviateText(basename(session.cwd) || session.cwd, 12);
+  const preview = abbreviateText(session.preview, 20);
+  const prefix = session.threadId === currentThreadId ? "当前 · " : "";
+  return `${prefix}${time} | ${cwdLabel} | ${preview}`;
+}
+
+function formatSessionTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "未知时间";
+  }
+
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  const hour = `${date.getHours()}`.padStart(2, "0");
+  const minute = `${date.getMinutes()}`.padStart(2, "0");
+  return `${month}-${day} ${hour}:${minute}`;
+}
+
+function abbreviateText(value: string, maxLength: number) {
+  return value.length > maxLength ? `${value.slice(0, Math.max(1, maxLength - 1))}…` : value;
+}
+
+function formatRecoveryStatus(status: ServiceState["recoveryStatus"]) {
+  switch (status) {
+    case "fresh":
+      return "新会话";
+    case "resume-pending":
+      return "等待恢复";
+    case "resumed":
+      return "已恢复";
+    case "recreated-after-missing-thread":
+      return "原会话不可用，已新建";
+    case "recreated-after-invalid-cwd":
+      return "工作目录失效，已新建";
+  }
+}
+
+function formatReasoningEffort(reasoningEffort: RelayConfig["codex"]["reasoningEffort"]) {
+  switch (reasoningEffort) {
+    case undefined:
+      return "默认";
+    case "minimal":
+      return "最小（minimal）";
+    case "low":
+      return "低（low）";
+    case "medium":
+      return "中（medium）";
+    case "high":
+      return "高（high）";
+    case "xhigh":
+      return "很高（xhigh）";
+  }
+}
+
+function formatApprovalPolicy(approvalPolicy: RelayConfig["codex"]["approvalPolicy"]) {
+  switch (approvalPolicy) {
+    case "never":
+      return "从不询问（never）";
+    case "on-request":
+      return "按需询问（on-request）";
+    case "on-failure":
+      return "失败时询问（on-failure）";
+    case "untrusted":
+      return "不受信任时询问（untrusted）";
+  }
+}
+
+function formatSandboxMode(sandboxMode: RelayConfig["codex"]["sandboxMode"]) {
+  switch (sandboxMode) {
+    case "read-only":
+      return "只读（read-only）";
+    case "workspace-write":
+      return "工作区可写（workspace-write）";
+    case "danger-full-access":
+      return "完全访问（danger-full-access）";
+  }
 }

@@ -42,6 +42,15 @@ export type RecoveryStatus =
   | "recreated-after-missing-thread"
   | "recreated-after-invalid-cwd";
 
+export type SessionHistoryEntry = {
+  id: string;
+  threadId: string;
+  cwd: string;
+  preview: string;
+  createdAt: string;
+  lastUsedAt: string;
+};
+
 export type ServiceState = {
   threadId: string | null;
   currentCwd: string;
@@ -51,6 +60,7 @@ export type ServiceState = {
     preview: string;
   } | null;
   previousShutdownHadActiveTask: boolean;
+  sessionHistory: SessionHistoryEntry[];
 };
 
 export type StagedAttachment = {
@@ -77,14 +87,28 @@ export type RunResult = {
   threadId: string | null;
 };
 
+export type ChatInlineKeyboardButton = {
+  text: string;
+  callback_data: string;
+};
+
+export type ChatInlineKeyboardMarkup = {
+  inline_keyboard: ChatInlineKeyboardButton[][];
+};
+
+export type ChatMessageOptions = {
+  replyMarkup?: ChatInlineKeyboardMarkup;
+};
+
 export type ChatAdapter = {
-  replyHtml(html: string): Promise<number>;
-  editHtml(messageId: number, html: string): Promise<void>;
+  replyHtml(html: string, options?: ChatMessageOptions): Promise<number>;
+  editHtml(messageId: number, html: string, options?: ChatMessageOptions): Promise<void>;
   deleteMessage(messageId: number): Promise<void>;
-  sendHtml(html: string): Promise<void>;
+  sendHtml(html: string, options?: ChatMessageOptions): Promise<void>;
   sendTyping(): Promise<void>;
   sendPhoto(path: string, caption?: string): Promise<void>;
   sendDocument(path: string, fileName: string, caption?: string): Promise<void>;
+  answerCallback(text?: string): Promise<void>;
 };
 
 export type IncomingAttachment = {

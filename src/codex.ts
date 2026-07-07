@@ -57,7 +57,7 @@ export class CodexSessionManager {
     const state = await this.stateStore.load();
     const resolvedPath = resolve(nextPath);
     if (!existsSync(resolvedPath)) {
-      throw new Error(`Path does not exist: ${resolvedPath}`);
+      throw new Error(`路径不存在：${resolvedPath}`);
     }
 
     await this.stateStore.save({
@@ -92,6 +92,7 @@ export class CodexSessionManager {
       let sawEvent = false;
       let currentThreadId = state.threadId;
       let markedResumed = false;
+      let recordedSession = false;
       const seenAgentText = new Map<string, string>();
 
       try {
@@ -110,6 +111,15 @@ export class CodexSessionManager {
             });
           }
 
+          if (mode === "resume" && currentThreadId && !recordedSession) {
+            recordedSession = true;
+            await this.stateStore.recordSession({
+              threadId: currentThreadId,
+              cwd: state.currentCwd,
+              preview: input.text
+            });
+          }
+
           if (event.type === "thread.started") {
             currentThreadId = event.thread_id;
             await this.stateStore.save({
@@ -117,6 +127,12 @@ export class CodexSessionManager {
               threadId: currentThreadId,
               recoveryStatus: mode === "resume" ? "resumed" : "fresh"
             });
+            await this.stateStore.recordSession({
+              threadId: currentThreadId,
+              cwd: state.currentCwd,
+              preview: input.text
+            });
+            recordedSession = true;
             continue;
           }
 
@@ -147,7 +163,7 @@ export class CodexSessionManager {
           });
           await input.onEvent({
             type: "status",
-            text: "Saved Codex session was unavailable. Creating a fresh session."
+            text: "已保存的 Codex 会话不可用，正在创建新会话。"
           });
           return attempt("fresh");
         }
@@ -184,7 +200,7 @@ function buildThreadOptions(
 function buildCodexInput(text: string, attachments: StagedAttachment[], exportDir: string): Input {
   const promptParts = [
     text,
-    `If you need to return images or files to Telegram, place copies under: ${exportDir}`
+    `如果你需要把图片或文件回传到 Telegram，请将副本放到：${exportDir}`
   ];
 
   const input: Input = [{ type: "text", text: promptParts.join("\n\n") }];
@@ -195,7 +211,7 @@ function buildCodexInput(text: string, attachments: StagedAttachment[], exportDi
       continue;
     }
 
-    promptParts.push(`Attached file available at ${attachment.path}`);
+    promptParts.push(`已附加文件路径：${attachment.path}`);
     (input[0] as { type: "text"; text: string }).text = promptParts.join("\n\n");
   }
 
@@ -239,7 +255,7 @@ async function emitRelayEvents(input: {
     if (event.item.type === "mcp_tool_call") {
       await input.onEvent({
         type: "status",
-        text: `Using ${event.item.server}/${event.item.tool}`
+        text: `正在使用工具 ${event.item.server}/${event.item.tool}`
       });
       return;
     }

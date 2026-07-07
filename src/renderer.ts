@@ -13,7 +13,7 @@ export function renderStatusMessage(input: {
   statusLines: string[];
   commandLines: string[];
 }) {
-  const lines = [`<b>${escapeHtml(input.state)}</b>`, `<code>cwd: ${escapeHtml(input.cwd)}</code>`];
+  const lines = [`<b>${escapeHtml(input.state)}</b>`, `<code>工作目录: ${escapeHtml(input.cwd)}</code>`];
 
   if (input.statusLines.length) {
     lines.push("", ...input.statusLines.map((line) => `• ${escapeHtml(line)}`));
@@ -22,7 +22,7 @@ export function renderStatusMessage(input: {
   if (input.commandLines.length) {
     lines.push(
       "",
-      "<b>Commands</b>",
+      "<b>执行命令</b>",
       `<blockquote expandable>${input.commandLines.map((line) => `$ ${escapeHtml(line)}`).join("\n")}</blockquote>`
     );
   }

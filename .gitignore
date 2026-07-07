@@ -1,1 +1,11 @@
 /.idea/
+/.env
+/node_modules/
+/dist/
+/build/
+/release/
+/startup-error.log
+/docker/.env
+/docker/docker-compose.yml
+/docker/config/relay.config.json
+/docker/data/

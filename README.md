@@ -16,7 +16,8 @@
 - 自动把附件下载到临时目录，再交给 Codex 使用
 - 自动监听当前工作目录下的 `.relay-out`，把新增或更新的文件回传到 Telegram
 - 保存 Codex 线程 ID 和当前工作目录，支持重启后继续已有会话
-- 提供 `/status`、`/pwd`、`/cd`、`/stop`、`/reset` 等控制命令
+- 保存最近 10 条历史会话，可在 Telegram 中通过按钮切换或删除
+- 提供 `/status`、`/pwd`、`/cd`、`/stop`、`/new`、`/sessions` 等控制命令
 
 ## 工作方式
 
@@ -30,7 +31,7 @@
 
 - 把 Telegram 附件保存到 `data/tmp/<run-id>/input`
 - 把当前工作目录下的 `.relay-out` 作为回传目录
-- 将 `If you need to return images or files to Telegram, place copies under: <exportDir>` 追加到提示中
+- 将“如果你需要把图片或文件回传到 Telegram，请将副本放到：`<exportDir>`”追加到提示中
 - 实时把 Codex 输出、状态和命令执行摘要同步回 Telegram
 - 在任务结束后扫描 `.relay-out`，把新生成或被更新的文件发回聊天窗口
 
@@ -42,10 +43,14 @@
 │  ├─ relay.config.example.json
 │  └─ relay.config.docker.example.json
 ├─ docker/
+│  ├─ .env.example
 │  ├─ Dockerfile
 │  ├─ docker-compose.example.yml
 │  └─ entrypoint.sh
 ├─ scripts/
+│  ├─ bootstrap.sh
+│  ├─ deploy.sh
+│  ├─ lib.sh
 │  └─ build-native.mjs
 ├─ src/
 │  ├─ index.ts
@@ -83,7 +88,7 @@
 
 ### 1. 环境变量
 
-从 `.env.example` 复制为 `.env`：
+原生运行时，从根目录 `.env.example` 复制为 `.env`：
 
 ```bash
 cp .env.example .env
@@ -203,6 +208,95 @@ npm start
 
 ## Docker 部署
 
+### Ubuntu 一键脚本
+
+如果服务器是 Ubuntu 且源码已经在服务器上，优先用下面两个脚本：
+
+- `scripts/bootstrap.sh`：首次初始化，安装 Docker、生成 Docker 配置并直接拉起服务
+- `scripts/deploy.sh`：后续更新部署，读取现有配置并重建或重启容器
+
+两个脚本都为非交互式，参数通过环境变量传入。
+
+需要区分两类配置：
+
+- `docker/.env`：容器创建级配置，主要是令牌、用户 ID、API Key、宿主机工作目录挂载路径
+- `docker/config/relay.config.json`：运行级配置，主要是模型、推理强度、沙箱、网络、默认工作目录
+
+这两类配置的生效方式不同：
+
+- 修改 `docker/.env` 后，通常需要执行 `bash scripts/deploy.sh` 让 Compose 重新创建 `relay` 容器；单纯 `restart` 不会更新容器环境变量
+- 修改 `docker/config/relay.config.json` 后，不需要删除容器，也不需要重建镜像；执行 `RESTART_ONLY=1 bash scripts/deploy.sh` 重启服务即可
+
+#### 首次初始化
+
+```bash
+cd /opt/telegram-codex-remote-control
+
+TELEGRAM_BOT_TOKEN=... \
+ALLOWED_TELEGRAM_USER_ID=... \
+OPENAI_API_KEY=... \
+WORKSPACE_HOST_PATH=/srv/codex/workspace \
+MODEL=gpt-5.4 \
+REASONING_EFFORT=xhigh \
+bash scripts/bootstrap.sh
+```
+
+可选环境变量：
+
+- `FORCE=1`：覆盖已有 `docker/.env` 和 `docker/config/relay.config.json`
+- `BASE_URL=https://api.openai.com/v1`：首次生成 `docker/config/relay.config.json` 时写入自定义兼容接口地址
+- `APPROVAL_POLICY=never`：首次生成运行配置时写入
+- `SANDBOX_MODE=danger-full-access`：首次生成运行配置时写入
+- `SKIP_GIT_REPO_CHECK=true`：首次生成运行配置时写入
+- `NETWORK_ACCESS_ENABLED=true`：首次生成运行配置时写入
+- `POLL_TIMEOUT_SECONDS=10`：首次生成运行配置时写入
+
+注意：
+
+- 这里的 `MODEL`、`REASONING_EFFORT`、`BASE_URL`、`APPROVAL_POLICY`、`SANDBOX_MODE` 等变量，是给初始化脚本用来“生成 `docker/config/relay.config.json`”的，不是容器内可热更新的运行环境变量
+- 如果后面要调整这些运行参数，直接编辑 `docker/config/relay.config.json`，然后执行 `RESTART_ONLY=1 bash scripts/deploy.sh` 即可
+
+首次执行后会自动生成：
+
+- `docker/docker-compose.yml`
+- `docker/.env`
+- `docker/config/relay.config.json`
+- `docker/data/`
+
+#### 后续更新部署
+
+```bash
+cd /opt/telegram-codex-remote-control
+bash scripts/deploy.sh
+```
+
+可选环境变量：
+
+- `PULL=1`：重建前先拉基础镜像
+- `FORCE_REBUILD=1`：无缓存重建镜像
+- `RESTART_ONLY=1`：只重启服务，不重建
+
+#### Skills 和持久化目录
+
+Docker 模式下，容器内 `/app/data` 会映射到宿主机：
+
+```text
+<项目目录>/docker/data
+```
+
+如果你手动安装 skills，直接放到：
+
+```text
+<项目目录>/docker/data/codex-home/skills
+```
+
+放完之后执行：
+
+```bash
+cd /opt/telegram-codex-remote-control
+RESTART_ONLY=1 bash scripts/deploy.sh
+```
+
 ### 构建镜像
 
 ```bash
@@ -219,7 +313,19 @@ docker build -f docker/Dockerfile -t telegram-codex-remote-control:local .
 
 1. 进入 `docker/` 目录。
 2. 将 `docker-compose.example.yml` 复制为你自己的 `docker-compose.yml`。
-3. 准备同目录下的 `.env`，至少包含：
+3. 将 `docker/.env.example` 复制为 `docker/.env`：
+
+```bash
+cp docker/.env.example docker/.env
+```
+
+Windows PowerShell 可用：
+
+```powershell
+Copy-Item docker/.env.example docker/.env
+```
+
+最小示例：
 
 ```env
 TELEGRAM_BOT_TOKEN=...
@@ -227,6 +333,12 @@ ALLOWED_TELEGRAM_USER_ID=...
 OPENAI_API_KEY=...
 WORKSPACE_HOST_PATH=D:/LD
 ```
+
+说明：
+
+- `docker/.env` 适合放少量不常改、且本来就依赖容器创建的参数
+- 如果你修改了 `docker/.env`，需要执行 `bash scripts/deploy.sh` 让容器按新环境重新创建
+- 如果你只是想改模型、推理强度、沙箱或网络策略，不要改这里，去改 `docker/config/relay.config.json`
 
 4. 准备 `docker/config/relay.config.json`，可参考 `config/relay.config.docker.example.json`。
 5. 启动：
@@ -242,6 +354,15 @@ docker compose up -d --build
 - `${WORKSPACE_HOST_PATH} -> /workspace`
 
 Docker 示例配置中，`defaultCwd` 默认应设置为 `/workspace`。
+
+如果后续只修改了 `docker/config/relay.config.json`，直接执行：
+
+```bash
+cd /opt/telegram-codex-remote-control
+RESTART_ONLY=1 bash scripts/deploy.sh
+```
+
+这会重启服务进程并重新读取配置文件，不需要删除容器。
 
 ## 原生打包
 
@@ -298,8 +419,8 @@ release/<platform>/
 
 如果没有填写 Caption：
 
-- 图片默认提示为 `Analyze this image.`
-- 文件默认提示为 `Inspect this file.`
+- 图片默认提示为 `请分析这张图片。`
+- 文件默认提示为 `请检查这个文件。`
 
 ### 可用命令
 
@@ -307,7 +428,13 @@ release/<platform>/
 - `/pwd`：查看当前工作目录
 - `/cd <path>`：切换工作目录，并重置当前 Codex 线程
 - `/stop`：中止当前正在运行的任务
-- `/reset`：清空当前线程，下一个任务会创建新会话
+- `/new`：清空当前线程，下一个任务会创建新会话
+- `/sessions`：显示最近 10 条历史会话，左侧按钮切换，右侧按钮删除
+
+`/sessions` 补充说明：
+
+- 按钮上显示的是“最近使用时间 + 目录名 + 文本摘要”，不会直接显示 thread ID
+- 删除的是本地保存的历史会话记录；删除当前会话后，下一个任务会新建会话
 
 ### 产物回传规则
 
