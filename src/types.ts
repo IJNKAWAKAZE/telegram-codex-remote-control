@@ -102,7 +102,9 @@ export type ChatMessageOptions = {
 
 export type ChatAdapter = {
   replyHtml(html: string, options?: ChatMessageOptions): Promise<number>;
+  replyRichMarkdown(markdown: string, options?: ChatMessageOptions): Promise<number>;
   editHtml(messageId: number, html: string, options?: ChatMessageOptions): Promise<void>;
+  editRichMarkdown(messageId: number, markdown: string, options?: ChatMessageOptions): Promise<void>;
   deleteMessage(messageId: number): Promise<void>;
   sendHtml(html: string, options?: ChatMessageOptions): Promise<void>;
   sendTyping(): Promise<void>;

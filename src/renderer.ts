@@ -1,4 +1,5 @@
 const MAX_MESSAGE_LENGTH = 3500;
+const MAX_RICH_MESSAGE_LENGTH = 32000;
 
 export function escapeHtml(value: string) {
   return value
@@ -42,6 +43,33 @@ export function renderBodyChunks(body: string) {
   for (const block of blocks) {
     const separator = chunk ? "\n\n" : "";
     if (chunk && chunk.length + separator.length + block.length > MAX_MESSAGE_LENGTH) {
+      chunks.push(chunk);
+      chunk = block;
+      continue;
+    }
+
+    chunk += `${separator}${block}`;
+  }
+
+  if (chunk) {
+    chunks.push(chunk);
+  }
+
+  return chunks;
+}
+
+export function renderRichBodyChunks(markdown: string) {
+  if (!markdown) {
+    return [];
+  }
+
+  const blocks = splitMarkdownBlocks(markdown);
+  const chunks: string[] = [];
+  let chunk = "";
+
+  for (const block of blocks) {
+    const separator = chunk ? "\n\n" : "";
+    if (chunk && chunk.length + separator.length + block.length > MAX_RICH_MESSAGE_LENGTH) {
       chunks.push(chunk);
       chunk = block;
       continue;
@@ -113,6 +141,78 @@ function renderMarkdownBlocks(markdown: string) {
   return blocks.length ? blocks : [escapeHtml(markdown)];
 }
 
+function splitMarkdownBlocks(markdown: string) {
+  const blocks: string[] = [];
+  const lines = markdown.replaceAll("\r\n", "\n").split("\n");
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index] ?? "";
+    const htmlBlockTag = matchRichHtmlBlockTag(line);
+
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+
+    if (line.startsWith("```")) {
+      const codeLines = [line];
+      index += 1;
+      while (index < lines.length && !lines[index]!.startsWith("```")) {
+        codeLines.push(lines[index]!);
+        index += 1;
+      }
+      if (index < lines.length && lines[index]!.startsWith("```")) {
+        codeLines.push(lines[index]!);
+        index += 1;
+      }
+      blocks.push(...splitLongFencedMarkdownBlock(codeLines.join("\n")));
+      continue;
+    }
+
+    if (htmlBlockTag) {
+      const htmlLines = [line];
+      index += 1;
+      while (index < lines.length && !lines[index]!.includes(`</${htmlBlockTag}>`)) {
+        htmlLines.push(lines[index]!);
+        index += 1;
+      }
+      if (index < lines.length) {
+        htmlLines.push(lines[index]!);
+        index += 1;
+      }
+      blocks.push(...splitLongMarkdownBlock(htmlLines.join("\n")));
+      continue;
+    }
+
+    if (line.trimStart().startsWith(">")) {
+      const quoteLines: string[] = [];
+      while (index < lines.length && lines[index]!.trimStart().startsWith(">")) {
+        quoteLines.push(lines[index]!);
+        index += 1;
+      }
+      blocks.push(...splitLongMarkdownBlock(quoteLines.join("\n")));
+      continue;
+    }
+
+    const paragraphLines: string[] = [];
+    while (index < lines.length) {
+      const current = lines[index] ?? "";
+      if (!current.trim() || current.startsWith("```") || current.trimStart().startsWith(">") || matchRichHtmlBlockTag(current)) {
+        break;
+      }
+      paragraphLines.push(current);
+      index += 1;
+    }
+
+    if (paragraphLines.length) {
+      blocks.push(...splitLongMarkdownBlock(paragraphLines.join("\n")));
+    }
+  }
+
+  return blocks.length ? blocks : splitLongMarkdownBlock(markdown.replaceAll("\r\n", "\n"));
+}
+
 function renderLine(line: string) {
   const headingMatch = line.match(/^\s{0,3}#{1,6}\s+(.+)$/);
   if (headingMatch) {
@@ -161,6 +261,117 @@ function renderStyledText(value: string) {
     .replace(/_([^_\n][\s\S]*?[^_\n]?)_/g, "<i>$1</i>")
     .replace(/~~([^~\n][\s\S]*?[^~\n]?)~~/g, "<s>$1</s>")
     .replace(/\|\|([^|\n][\s\S]*?[^|\n]?)\|\|/g, "<tg-spoiler>$1</tg-spoiler>");
+}
+
+function splitLongMarkdownBlock(block: string) {
+  if (block.length <= MAX_RICH_MESSAGE_LENGTH) {
+    return [block];
+  }
+
+  const chunks: string[] = [];
+  let chunk = "";
+
+  for (const line of block.split("\n")) {
+    const next = chunk ? `${chunk}\n${line}` : line;
+    if (next.length <= MAX_RICH_MESSAGE_LENGTH) {
+      chunk = next;
+      continue;
+    }
+
+    if (chunk) {
+      chunks.push(chunk);
+      chunk = "";
+    }
+
+    if (line.length <= MAX_RICH_MESSAGE_LENGTH) {
+      chunk = line;
+      continue;
+    }
+
+    chunks.push(...splitLongMarkdownLine(line, MAX_RICH_MESSAGE_LENGTH));
+  }
+
+  if (chunk) {
+    chunks.push(chunk);
+  }
+
+  return chunks;
+}
+
+function splitLongFencedMarkdownBlock(block: string) {
+  if (block.length <= MAX_RICH_MESSAGE_LENGTH) {
+    return [block];
+  }
+
+  const lines = block.split("\n");
+  const opener = lines[0] ?? "```";
+  const hasClosingFence = lines.length > 1 && (lines.at(-1)?.startsWith("```") ?? false);
+  const closer = hasClosingFence ? (lines.at(-1) ?? "```") : "```";
+  const bodyLines = hasClosingFence ? lines.slice(1, -1) : lines.slice(1);
+  const wrapperBudget = Math.max(1, MAX_RICH_MESSAGE_LENGTH - opener.length - closer.length - 2);
+  const chunks: string[] = [];
+  let chunk = "";
+
+  for (const line of bodyLines) {
+    const next = chunk ? `${chunk}\n${line}` : line;
+    if (next.length <= wrapperBudget) {
+      chunk = next;
+      continue;
+    }
+
+    if (chunk) {
+      chunks.push(`${opener}\n${chunk}\n${closer}`);
+      chunk = "";
+    }
+
+    if (line.length <= wrapperBudget) {
+      chunk = line;
+      continue;
+    }
+
+    for (const piece of splitLongMarkdownLine(line, wrapperBudget)) {
+      chunks.push(`${opener}\n${piece}\n${closer}`);
+    }
+  }
+
+  if (chunk || !chunks.length) {
+    chunks.push(`${opener}\n${chunk}\n${closer}`);
+  }
+
+  return chunks;
+}
+
+function splitLongMarkdownLine(line: string, maxLength: number) {
+  const chunks: string[] = [];
+  let remaining = line;
+
+  while (remaining.length > maxLength) {
+    const splitAt = findSplitPoint(remaining, maxLength);
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt).trimStart();
+  }
+
+  if (remaining) {
+    chunks.push(remaining);
+  }
+
+  return chunks;
+}
+
+function findSplitPoint(value: string, maxLength: number) {
+  const searchStart = Math.max(0, maxLength - 200);
+  const whitespaceIndex = value.lastIndexOf(" ", maxLength);
+  if (whitespaceIndex >= searchStart) {
+    return whitespaceIndex;
+  }
+
+  return maxLength;
+}
+
+function matchRichHtmlBlockTag(line: string) {
+  const trimmed = line.trimStart();
+  const match = trimmed.match(/^<(details|table|tg-collage|tg-slideshow|blockquote|aside|figure)(\s|>)/i);
+  return match?.[1]?.toLowerCase() ?? null;
 }
 
 function renderCodeBlockChunks(code: string, language: string) {

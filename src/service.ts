@@ -4,13 +4,14 @@ import { basename, resolve } from "node:path";
 import type { ChatAdapter, ChatInlineKeyboardMarkup, IncomingAttachment, RelayConfig, ServiceState, SessionHistoryEntry } from "./types.js";
 import { AttachmentStore } from "./attachments.js";
 import { CodexSessionManager } from "./codex.js";
-import { renderBodyChunks, renderStatusMessage } from "./renderer.js";
+import { renderBodyChunks, renderRichBodyChunks, renderStatusMessage } from "./renderer.js";
 import { FileStateStore, SESSION_HISTORY_LIMIT } from "./state.js";
 import { TelegramGateway } from "./telegram.js";
 
 const STATUS_HISTORY_LIMIT = 6;
 const COMMAND_HISTORY_LIMIT = 12;
 const TELEGRAM_TYPING_INTERVAL_MS = 4000;
+type BodyRenderMode = "html" | "rich";
 
 export class RemoteControlService {
   private readonly stateStore: FileStateStore;
@@ -303,6 +304,7 @@ export class RemoteControlService {
     let bodyMessageIds: number[] = [];
     let renderedStatus = "";
     let renderedBodyChunks: string[] = [];
+    let renderedBodyMode: BodyRenderMode | null = null;
     let lastSyncAt = 0;
     let typingTimer: NodeJS.Timeout | null = null;
     let typingInFlight = false;
@@ -336,7 +338,7 @@ export class RemoteControlService {
       }
     };
 
-    const syncMessages = async (stateLabel: string, force = false) => {
+    const syncMessages = async (stateLabel: string, force = false, bodyMode: BodyRenderMode = "html") => {
       const now = Date.now();
       if (!force && now - lastSyncAt < 750) {
         return;
@@ -348,7 +350,7 @@ export class RemoteControlService {
         statusLines,
         commandLines
       });
-      const bodyChunks = renderBodyChunks(body);
+      const bodyChunks = bodyMode === "rich" ? renderRichBodyChunks(body) : renderBodyChunks(body);
       lastSyncAt = now;
 
       if (statusMessageId) {
@@ -364,17 +366,33 @@ export class RemoteControlService {
       for (let index = 0; index < bodyChunks.length; index += 1) {
         const chunk = bodyChunks[index];
         const existingMessageId = bodyMessageIds[index];
-        if (renderedBodyChunks[index] === chunk) {
+        if (renderedBodyMode === bodyMode && renderedBodyChunks[index] === chunk) {
           continue;
         }
 
         if (existingMessageId) {
-          await adapter.editHtml(existingMessageId, chunk);
+          if (bodyMode === "rich") {
+            await adapter.editRichMarkdown(existingMessageId, chunk);
+          } else {
+            await adapter.editHtml(existingMessageId, chunk);
+          }
         } else {
-          bodyMessageIds.push(await adapter.replyHtml(chunk));
+          bodyMessageIds.push(
+            bodyMode === "rich" ? await adapter.replyRichMarkdown(chunk) : await adapter.replyHtml(chunk)
+          );
         }
         renderedBodyChunks[index] = chunk;
       }
+
+      while (bodyMessageIds.length > bodyChunks.length) {
+        const messageId = bodyMessageIds.pop();
+        renderedBodyChunks.pop();
+        if (messageId) {
+          await adapter.deleteMessage(messageId);
+        }
+      }
+
+      renderedBodyMode = bodyChunks.length ? bodyMode : renderedBodyMode;
     };
 
     try {
@@ -409,7 +427,16 @@ export class RemoteControlService {
       });
 
       stopTypingHeartbeat();
-      await syncMessages(result.stopped ? "已停止" : "已完成", true);
+      if (result.stopped) {
+        await syncMessages("已停止", true);
+      } else {
+        try {
+          await syncMessages("已完成", true, "rich");
+        } catch (error) {
+          console.error("[service] Failed to render rich Telegram output, falling back to HTML:", error);
+          await syncMessages("已完成", true);
+        }
+      }
 
       const artifacts = await this.attachmentStore.collectNewArtifacts(runDirs.exportDir, exportSnapshot);
       for (const artifact of artifacts) {

@@ -119,9 +119,24 @@ function createChatAdapter(api: Api, chatId: number, callbackQueryId?: string): 
       });
       return message.message_id;
     },
+    async replyRichMarkdown(markdown: string, options?: ChatMessageOptions) {
+      const message = await api.sendRichMessage(
+        chatId,
+        { markdown },
+        {
+          ...(options?.replyMarkup ? { reply_markup: options.replyMarkup } : {})
+        }
+      );
+      return message.message_id;
+    },
     async editHtml(messageId: number, html: string, options?: ChatMessageOptions) {
       await api.editMessageText(chatId, messageId, html, {
         parse_mode: "HTML",
+        ...(options?.replyMarkup ? { reply_markup: options.replyMarkup } : {})
+      });
+    },
+    async editRichMarkdown(messageId: number, markdown: string, options?: ChatMessageOptions) {
+      await api.editMessageText(chatId, messageId, { markdown }, {
         ...(options?.replyMarkup ? { reply_markup: options.replyMarkup } : {})
       });
     },
