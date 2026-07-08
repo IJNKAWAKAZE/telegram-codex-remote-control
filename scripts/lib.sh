@@ -10,6 +10,7 @@ DOCKER_COMPOSE_FILE="${DOCKER_DIR}/docker-compose.yml"
 DOCKER_ENV_FILE="${DOCKER_DIR}/.env"
 DOCKER_CONFIG_DIR="${DOCKER_DIR}/config"
 DOCKER_DATA_DIR="${DOCKER_DIR}/data"
+DOCKER_SECRETS_DIR="${DOCKER_DIR}/secrets"
 RELAY_CONFIG_FILE="${DOCKER_CONFIG_DIR}/relay.config.json"
 
 log() {
@@ -148,6 +149,12 @@ ensure_directory() {
   mkdir -p "${dir}"
 }
 
+ensure_private_directory() {
+  local dir="$1"
+  mkdir -p "${dir}"
+  chmod 700 "${dir}"
+}
+
 ensure_host_workspace() {
   local workspace_path="$1"
   local owner_user
@@ -183,6 +190,10 @@ validate_non_negative_integer() {
 
 write_docker_env_file() {
   local force="${1:-0}"
+  local github_enable
+  local github_username
+  local github_email
+  local github_token_file
 
   if [ -f "${DOCKER_ENV_FILE}" ] && ! is_truthy "${force}"; then
     log "Keeping existing ${DOCKER_ENV_FILE}"
@@ -194,12 +205,20 @@ write_docker_env_file() {
   : "${OPENAI_API_KEY:?OPENAI_API_KEY is required}"
 
   WORKSPACE_HOST_PATH="$(resolve_workspace_host_path)"
+  github_enable="$(normalize_json_bool "${GITHUB_ENABLE:-false}")"
+  github_username="${GITHUB_USERNAME:-}"
+  github_email="${GITHUB_EMAIL:-}"
+  github_token_file="${GITHUB_TOKEN_FILE:-/run/secrets/github_token}"
 
   cat > "${DOCKER_ENV_FILE}" <<EOF
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 ALLOWED_TELEGRAM_USER_ID=${ALLOWED_TELEGRAM_USER_ID}
 OPENAI_API_KEY=${OPENAI_API_KEY}
 WORKSPACE_HOST_PATH=${WORKSPACE_HOST_PATH}
+GITHUB_ENABLE=${github_enable}
+GITHUB_USERNAME=${github_username}
+GITHUB_EMAIL=${github_email}
+GITHUB_TOKEN_FILE=${github_token_file}
 EOF
 
   log "Wrote ${DOCKER_ENV_FILE}"
@@ -270,6 +289,7 @@ ensure_docker_files() {
   ensure_compose_file
   ensure_directory "${DOCKER_CONFIG_DIR}"
   ensure_directory "${DOCKER_DATA_DIR}"
+  ensure_private_directory "${DOCKER_SECRETS_DIR}"
 }
 
 require_bootstrap_os() {

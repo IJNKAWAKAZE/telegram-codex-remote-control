@@ -9,3 +9,4 @@
 /docker/docker-compose.yml
 /docker/config/relay.config.json
 /docker/data/
+/docker/secrets/

@@ -7,10 +7,15 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       ALLOWED_TELEGRAM_USER_ID: ${ALLOWED_TELEGRAM_USER_ID}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      GITHUB_ENABLE: ${GITHUB_ENABLE:-false}
+      GITHUB_USERNAME: ${GITHUB_USERNAME:-}
+      GITHUB_EMAIL: ${GITHUB_EMAIL:-}
+      GITHUB_TOKEN_FILE: ${GITHUB_TOKEN_FILE:-/run/secrets/github_token}
       RELAY_HOME: /app
       CODEX_HOME: /app/data/codex-home
     volumes:
       - ./config:/app/config
       - ./data:/app/data
+      - ./secrets:/run/secrets:ro
       - ${WORKSPACE_HOST_PATH}:/workspace
     restart: unless-stopped

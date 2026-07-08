@@ -251,6 +251,32 @@ bash scripts/bootstrap.sh
 - `NETWORK_ACCESS_ENABLED=true`：首次生成运行配置时写入
 - `POLL_TIMEOUT_SECONDS=10`：首次生成运行配置时写入
 
+可选 GitHub 集成变量：
+
+- `GITHUB_ENABLE=true`：启用容器启动时的 GitHub 初始化
+- `GITHUB_USERNAME=codex-bot`：写入容器内 Git 提交身份名称
+- `GITHUB_EMAIL=bot@example.com`：写入容器内 Git 提交身份邮箱
+- `GITHUB_TOKEN_FILE=/run/secrets/github_token`：容器内 GitHub PAT 文件路径
+
+如果要启用 GitHub 集成，还需要在宿主机 `docker/secrets/` 下准备只读 token 文件：
+
+```bash
+mkdir -p docker/secrets
+chmod 700 docker/secrets
+printf '%s\n' "${GITHUB_PAT:?set GITHUB_PAT first}" > docker/secrets/github_token
+chmod 600 docker/secrets/github_token
+```
+
+上面的示例使用 POSIX shell；如果你在 Windows 上手动准备该文件，请改用等价命令或在 WSL、Git Bash 等 POSIX 环境中执行。
+创建或轮换 `github_token` 后，需要在下一次容器或服务重启时才会生效，不会热加载。
+
+不需要 GitHub 时，保持 `GITHUB_ENABLE=false` 即可。容器会继续正常启动，并在日志中输出 `GitHub integration disabled`。
+
+该 PAT 需要具备足够的权限或 scopes，至少要能创建仓库、克隆私有仓库并向目标仓库推送代码。
+
+启用后，运行中的 `relay` 服务进程及其拉起的 Codex 任务流程会在启动后获得 GitHub 认证；这不会自动作用于你后续手动打开的任意全新 `docker exec` shell。
+如果你已经有现成的 `docker/docker-compose.yml`，`bootstrap.sh` 不会自动重新生成它；启用 GitHub 时除了刷新 `docker/.env` 里的相关值，还要手动同步 `./secrets:/run/secrets:ro` 挂载。
+
 注意：
 
 - 这里的 `MODEL`、`REASONING_EFFORT`、`BASE_URL`、`APPROVAL_POLICY`、`SANDBOX_MODE` 等变量，是给初始化脚本用来“生成 `docker/config/relay.config.json`”的，不是容器内可热更新的运行环境变量
@@ -262,6 +288,7 @@ bash scripts/bootstrap.sh
 - `docker/.env`
 - `docker/config/relay.config.json`
 - `docker/data/`
+- `docker/secrets/`
 
 #### 后续更新部署
 
@@ -311,18 +338,18 @@ docker build -f docker/Dockerfile -t telegram-codex-remote-control:local .
 
 ### 使用 docker-compose
 
-1. 进入 `docker/` 目录。
+1. 在仓库根目录执行 `cd docker/`。下面这个小节中的相对路径（例如 `.env`、`config/relay.config.json`、`secrets/github_token`）都以当前 `docker/` 目录为准。
 2. 将 `docker-compose.example.yml` 复制为你自己的 `docker-compose.yml`。
-3. 将 `docker/.env.example` 复制为 `docker/.env`：
+3. 将 `.env.example` 复制为 `.env`：
 
 ```bash
-cp docker/.env.example docker/.env
+cp .env.example .env
 ```
 
 Windows PowerShell 可用：
 
 ```powershell
-Copy-Item docker/.env.example docker/.env
+Copy-Item .env.example .env
 ```
 
 最小示例：
@@ -336,11 +363,42 @@ WORKSPACE_HOST_PATH=D:/LD
 
 说明：
 
-- `docker/.env` 适合放少量不常改、且本来就依赖容器创建的参数
-- 如果你修改了 `docker/.env`，需要执行 `bash scripts/deploy.sh` 让容器按新环境重新创建
-- 如果你只是想改模型、推理强度、沙箱或网络策略，不要改这里，去改 `docker/config/relay.config.json`
+- 当前目录下的 `.env`（仓库根目录对应 `docker/.env`）适合放少量不常改、且本来就依赖容器创建的参数
+- 如果你修改了当前目录下的 `.env`，需要执行 `bash ../scripts/deploy.sh` 或从仓库根目录执行 `bash scripts/deploy.sh`，让容器按新环境重新创建
+- 如果你只是想改模型、推理强度、沙箱或网络策略，不要改这里，去改当前目录下的 `config/relay.config.json`
 
-4. 准备 `docker/config/relay.config.json`，可参考 `config/relay.config.docker.example.json`。
+可选 GitHub 集成示例：
+
+```env
+GITHUB_ENABLE=true
+GITHUB_USERNAME=codex-bot
+GITHUB_EMAIL=bot@example.com
+GITHUB_TOKEN_FILE=/run/secrets/github_token
+```
+
+如果启用了这组变量，还需要在当前 `docker/` 目录下的 `secrets/` 中准备对应的只读 token 文件：
+
+```bash
+mkdir -p secrets
+chmod 700 secrets
+printf '%s\n' "${GITHUB_PAT:?set GITHUB_PAT first}" > secrets/github_token
+chmod 600 secrets/github_token
+```
+
+上面的示例使用 POSIX shell；如果你在 Windows 上手动准备该文件，请改用等价命令或在 WSL、Git Bash 等 POSIX 环境中执行。
+创建或轮换 `github_token` 后，需要在下一次容器或服务重启时才会生效，不会热加载。
+
+该 PAT 需要具备足够的权限或 scopes，至少要能创建仓库、克隆私有仓库并向目标仓库推送代码。
+
+如果不需要 GitHub，保持 `GITHUB_ENABLE=false` 即可。容器仍会正常启动，并在日志中输出 `GitHub integration disabled`。
+
+启用后，运行中的 `relay` 服务进程及其拉起的 Codex 任务流程会在启动后获得 GitHub 认证，因此在这条任务链路里可以执行 `gh repo create`、`gh repo clone`、`git pull` 和 `git push`。
+
+默认 Compose 示例现在会把 `./secrets:/run/secrets:ro` 作为只读挂载提供给容器。
+
+如果你已经存在旧的 `docker/docker-compose.yml` 和 `docker/.env`，启用 GitHub 时需要手动同步两处：把新的 GitHub 环境变量写入 `.env`，并把 `./secrets:/run/secrets:ro` 挂载补到 `docker-compose.yml`。
+
+4. 准备当前目录下的 `config/relay.config.json`，可参考仓库根目录的 `config/relay.config.docker.example.json`。
 5. 启动：
 
 ```bash
@@ -351,6 +409,7 @@ docker compose up -d --build
 
 - `./config -> /app/config`
 - `./data -> /app/data`
+- `./secrets -> /run/secrets`（只读，对应 Compose 中的 `./secrets:/run/secrets:ro`）
 - `${WORKSPACE_HOST_PATH} -> /workspace`
 
 Docker 示例配置中，`defaultCwd` 默认应设置为 `/workspace`。
