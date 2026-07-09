@@ -27,6 +27,7 @@ export type RelayConfig = {
     baseUrl?: string;
     provider?: CodexProviderConfig;
     model: string;
+    models: string[];
     reasoningEffort?: ModelReasoningEffort;
     approvalPolicy: ApprovalPolicy;
     sandboxMode: SandboxMode;
@@ -46,6 +47,7 @@ export type SessionHistoryEntry = {
   id: string;
   threadId: string;
   cwd: string;
+  model: string;
   preview: string;
   createdAt: string;
   lastUsedAt: string;
@@ -54,6 +56,7 @@ export type SessionHistoryEntry = {
 export type ServiceState = {
   threadId: string | null;
   currentCwd: string;
+  currentModel: string;
   recoveryStatus: RecoveryStatus;
   activeRun: {
     startedAt: string;

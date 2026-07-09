@@ -1,7 +1,15 @@
 import { existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { basename, resolve } from "node:path";
-import type { ChatAdapter, ChatInlineKeyboardMarkup, IncomingAttachment, RelayConfig, ServiceState, SessionHistoryEntry } from "./types.js";
+import type {
+  ChatAdapter,
+  ChatInlineKeyboardMarkup,
+  IncomingAttachment,
+  RelayConfig,
+  ServiceState,
+  SessionHistoryEntry,
+  StagedAttachment
+} from "./types.js";
 import { AttachmentStore } from "./attachments.js";
 import { CodexSessionManager } from "./codex.js";
 import {
@@ -27,7 +35,7 @@ export class RemoteControlService {
   readonly telegram: TelegramGateway;
 
   constructor(private readonly config: RelayConfig) {
-    this.stateStore = new FileStateStore(config.stateFile, config.defaultCwd);
+    this.stateStore = new FileStateStore(config.stateFile, config.defaultCwd, config.codex.model);
     this.attachmentStore = new AttachmentStore(config.tempDir);
     this.codex = new CodexSessionManager(config, this.stateStore);
     this.telegram = new TelegramGateway(config, {
@@ -56,6 +64,7 @@ export class RemoteControlService {
         ...(nextState ?? state),
         threadId: null,
         currentCwd: this.config.defaultCwd,
+        currentModel: this.config.codex.model,
         recoveryStatus: "recreated-after-invalid-cwd"
       };
     } else if (state.threadId) {
@@ -93,7 +102,7 @@ export class RemoteControlService {
         bytes: downloaded.bytes
       });
 
-      await this.runExclusive(adapter, attachment.caption, [staged], runDirs.exportDir, runId);
+      await this.runExclusive(adapter, attachment.caption, [staged], runDirs.exportDir);
     });
   }
 
@@ -119,6 +128,14 @@ export class RemoteControlService {
         await this.sendSessionPicker(adapter);
         return;
       }
+      case "/model": {
+        if (this.isTaskBusy()) {
+          await adapter.sendHtml("任务运行中，无法切换模型。");
+          return;
+        }
+        await this.sendModelPicker(adapter);
+        return;
+      }
       case "/stop": {
         if (!this.isTaskBusy()) {
           await adapter.sendHtml("当前没有正在运行的任务。");
@@ -139,7 +156,7 @@ export class RemoteControlService {
           return;
         }
         await this.codex.resetThread();
-        await adapter.sendHtml("已切换为新会话。下一次任务会启动新的 Codex 线程。");
+        await adapter.sendHtml("已切换为新会话。下一次任务会启动新的 Codex 线程并恢复默认模型。");
         return;
       }
       case "/cd": {
@@ -163,19 +180,24 @@ export class RemoteControlService {
         }
         await this.codex.changeDirectory(nextPath);
         await adapter.sendHtml(
-          `工作目录已切换到 <code>${escapeHtml(nextPath)}</code>。下一次任务会启动新的 Codex 线程。`
+          `工作目录已切换到 <code>${escapeHtml(nextPath)}</code>。下一次任务会启动新的 Codex 线程并恢复默认模型。`
         );
         return;
       }
       default: {
         await adapter.sendHtml(
-          "支持的命令：<code>/status</code>、<code>/pwd</code>、<code>/cd &lt;路径&gt;</code>、<code>/stop</code>、<code>/new</code>、<code>/sessions</code>"
+          "支持的命令：<code>/status</code>、<code>/pwd</code>、<code>/cd &lt;路径&gt;</code>、<code>/model</code>、<code>/stop</code>、<code>/new</code>、<code>/sessions</code>"
         );
       }
     }
   }
 
   private async handleCallback(adapter: ChatAdapter, data: string, messageId: number | null) {
+    if (data.startsWith("model:")) {
+      await this.handleModelCallback(adapter, data, messageId);
+      return;
+    }
+
     if (!data.startsWith("session:")) {
       await adapter.answerCallback();
       return;
@@ -212,7 +234,11 @@ export class RemoteControlService {
         }
 
         const currentState = await this.stateStore.load();
-        if (currentState.threadId === session.threadId && currentState.currentCwd === session.cwd) {
+        if (
+          currentState.threadId === session.threadId &&
+          currentState.currentCwd === session.cwd &&
+          currentState.currentModel === session.model
+        ) {
           await adapter.answerCallback("已经是当前会话。");
           await this.refreshSessionPicker(adapter, messageId, `当前已经是会话“${session.preview}”。`);
           return;
@@ -229,7 +255,7 @@ export class RemoteControlService {
         await this.refreshSessionPicker(
           adapter,
           messageId,
-          `已切换到会话“${activated.preview}”，工作目录为 ${activated.cwd}`
+          `已切换到会话“${activated.preview}”，模型为 ${activated.model}，工作目录为 ${activated.cwd}`
         );
         return;
       }
@@ -246,7 +272,7 @@ export class RemoteControlService {
           adapter,
           messageId,
           deleted.isCurrentSession
-            ? `已删除当前会话“${deleted.entry.preview}”。下一次任务会新建会话。`
+            ? `已删除当前会话“${deleted.entry.preview}”。下一次任务会新建会话并恢复默认模型。`
             : `已删除会话“${deleted.entry.preview}”。`
         );
         return;
@@ -269,7 +295,9 @@ export class RemoteControlService {
       `<code>恢复状态: ${escapeHtml(formatRecoveryStatus(state.recoveryStatus))}</code>`,
       `<code>接口地址: ${escapeHtml(this.config.codex.baseUrl ?? "默认（OpenAI 官方）")}</code>`,
       `<code>提供方: ${escapeHtml(renderProviderStatus(this.config))}</code>`,
-      `<code>模型: ${escapeHtml(this.config.codex.model)}</code>`,
+      `<code>当前会话模型: ${escapeHtml(state.currentModel)}</code>`,
+      `<code>默认模型: ${escapeHtml(this.config.codex.model)}</code>`,
+      `<code>可选模型数: ${this.config.codex.models.length}</code>`,
       `<code>推理强度: ${escapeHtml(formatReasoningEffort(this.config.codex.reasoningEffort))}</code>`,
       `<code>审批策略: ${escapeHtml(formatApprovalPolicy(this.config.codex.approvalPolicy))}</code>`,
       `<code>沙箱模式: ${escapeHtml(formatSandboxMode(this.config.codex.sandboxMode))}</code>`,
@@ -279,12 +307,59 @@ export class RemoteControlService {
     ].join("\n");
   }
 
+  private async handleModelCallback(adapter: ChatAdapter, data: string, messageId: number | null) {
+    if (this.isTaskBusy()) {
+      await adapter.answerCallback("任务运行中，无法切换模型。");
+      return;
+    }
+
+    const [, action, rawModelIndex] = data.split(":");
+    if (!action) {
+      await adapter.answerCallback("这个按钮已经失效。");
+      return;
+    }
+
+    if (action === "refresh") {
+      await adapter.answerCallback();
+      await this.refreshModelPicker(adapter, messageId, "模型列表已刷新。");
+      return;
+    }
+
+    if (action !== "set") {
+      await adapter.answerCallback("这个按钮已经失效。");
+      return;
+    }
+
+    const modelIndex = Number.parseInt(rawModelIndex ?? "", 10);
+    const selectedModel = this.config.codex.models[modelIndex];
+    if (!Number.isInteger(modelIndex) || !selectedModel) {
+      await adapter.answerCallback("模型不存在或已失效。");
+      return;
+    }
+
+    const state = await this.stateStore.load();
+    if (state.currentModel === selectedModel) {
+      await adapter.answerCallback("当前已经是这个模型。");
+      await this.refreshModelPicker(adapter, messageId, `当前已经使用模型 ${selectedModel}。`);
+      return;
+    }
+
+    await this.stateStore.switchModel(selectedModel);
+    await adapter.answerCallback(`已选择 ${selectedModel}`);
+    await this.refreshModelPicker(
+      adapter,
+      messageId,
+      state.threadId
+        ? `已切换到模型 ${selectedModel}。当前会话会继续沿用已有上下文，Codex 可能提示旧线程原先记录的是其他模型。`
+        : `已切换到模型 ${selectedModel}。`
+    );
+  }
+
   private async runExclusive(
     adapter: ChatAdapter,
     text: string,
-    attachments: Awaited<ReturnType<AttachmentStore["stageAttachment"]>>[],
-    exportDirOverride?: string,
-    runId?: string
+    attachments: StagedAttachment[],
+    exportDirOverride?: string
   ) {
     const state = await this.stateStore.load();
     if (state.activeRun) {
@@ -293,7 +368,7 @@ export class RemoteControlService {
     }
 
     const currentCwd = state.currentCwd;
-    const currentRunId = runId || createRunId();
+    const currentRunId = createRunId();
     const runDirs =
       exportDirOverride
         ? { exportDir: exportDirOverride }
@@ -514,6 +589,22 @@ export class RemoteControlService {
     await adapter.sendHtml(html, replyMarkup ? { replyMarkup } : undefined);
   }
 
+  private async sendModelPicker(adapter: ChatAdapter, notice?: string) {
+    const { html, replyMarkup } = await this.renderModelPicker(notice);
+    await adapter.sendHtml(html, { replyMarkup });
+  }
+
+  private async refreshModelPicker(adapter: ChatAdapter, messageId: number | null, notice?: string) {
+    const { html, replyMarkup } = await this.renderModelPicker(notice);
+    const options = { replyMarkup };
+    if (messageId === null) {
+      await adapter.sendHtml(html, options);
+      return;
+    }
+
+    await adapter.editHtml(messageId, html, options);
+  }
+
   private async refreshSessionPicker(adapter: ChatAdapter, messageId: number | null, notice?: string) {
     const { html, replyMarkup } = await this.renderSessionPicker(notice);
     const options = replyMarkup ? { replyMarkup } : undefined;
@@ -525,12 +616,50 @@ export class RemoteControlService {
     await adapter.editHtml(messageId, html, options);
   }
 
+  private async renderModelPicker(notice?: string) {
+    const state = await this.stateStore.load();
+    const lines = [
+      "<b>模型切换</b>",
+      "<code>默认模型用于新会话初始值。切换后会保留当前会话上下文；如果当前线程原先是按其他模型记录的，Codex 可能给出提示。</code>",
+      `<code>当前会话模型: ${escapeHtml(state.currentModel)}</code>`,
+      `<code>默认模型: ${escapeHtml(this.config.codex.model)}</code>`,
+      `<code>当前目录: ${escapeHtml(state.currentCwd)}</code>`,
+      `<code>当前线程: ${escapeHtml(state.threadId ?? "尚未创建")}</code>`
+    ];
+
+    if (notice) {
+      lines.push("", escapeHtml(notice));
+    }
+
+    const replyMarkup: ChatInlineKeyboardMarkup = {
+      inline_keyboard: [
+        ...this.config.codex.models.map((model, index) => [
+          {
+            text: formatModelButtonLabel(model, state.currentModel, this.config.codex.model),
+            callback_data: `model:set:${index}`
+          }
+        ]),
+        [
+          {
+            text: "刷新",
+            callback_data: "model:refresh"
+          }
+        ]
+      ]
+    };
+
+    return {
+      html: lines.join("\n"),
+      replyMarkup
+    };
+  }
+
   private async renderSessionPicker(notice?: string) {
     const state = await this.stateStore.load();
     const sessions = await this.stateStore.listRecentSessions();
     const lines = [
       "<b>最近会话</b>",
-      `<code>仅保留最近 ${SESSION_HISTORY_LIMIT} 条。点击左侧切换，右侧删除。</code>`
+      `<code>仅保留最近 ${SESSION_HISTORY_LIMIT} 条。正文显示详情，按钮按编号对应；左侧切换，右侧删除。</code>`
     ];
 
     if (notice) {
@@ -545,14 +674,22 @@ export class RemoteControlService {
       };
     }
 
+    sessions.forEach((session, index) => {
+      lines.push(
+        "",
+        renderSessionSummaryLine(index, session, state.threadId),
+        escapeHtml(abbreviateText(session.preview, 80))
+      );
+    });
+
     const replyMarkup: ChatInlineKeyboardMarkup = {
-      inline_keyboard: sessions.map((session) => [
+      inline_keyboard: sessions.map((session, index) => [
         {
-          text: formatSessionButtonLabel(session, state.threadId),
+          text: formatSessionButtonLabel(index, session, state.threadId),
           callback_data: `session:use:${session.id}`
         },
         {
-          text: "删除",
+          text: "删",
           callback_data: `session:delete:${session.id}`
         }
       ])
@@ -613,12 +750,17 @@ function summarizeCommand(command: string) {
   return command.length > 240 ? `${command.slice(0, 237)}...` : command;
 }
 
-function formatSessionButtonLabel(session: SessionHistoryEntry, currentThreadId: string | null) {
+function formatSessionButtonLabel(index: number, session: SessionHistoryEntry, currentThreadId: string | null) {
+  const label = `${index + 1}`;
+  return session.threadId === currentThreadId ? `*${label}` : label;
+}
+
+function renderSessionSummaryLine(index: number, session: SessionHistoryEntry, currentThreadId: string | null) {
   const time = formatSessionTime(session.lastUsedAt);
-  const cwdLabel = abbreviateText(basename(session.cwd) || session.cwd, 12);
-  const preview = abbreviateText(session.preview, 20);
-  const prefix = session.threadId === currentThreadId ? "当前 · " : "";
-  return `${prefix}${time} | ${cwdLabel} | ${preview}`;
+  const cwdLabel = abbreviateText(basename(session.cwd) || session.cwd, 18);
+  const modelLabel = abbreviateText(session.model, 24);
+  const prefix = session.threadId === currentThreadId ? "当前" : "会话";
+  return `<code>${prefix} ${index + 1} | ${time} | ${escapeHtml(cwdLabel)} | ${escapeHtml(modelLabel)}</code>`;
 }
 
 function formatSessionTime(value: string) {
@@ -636,6 +778,12 @@ function formatSessionTime(value: string) {
 
 function abbreviateText(value: string, maxLength: number) {
   return value.length > maxLength ? `${value.slice(0, Math.max(1, maxLength - 1))}…` : value;
+}
+
+function formatModelButtonLabel(model: string, currentModel: string, defaultModel: string) {
+  const prefix = model === currentModel ? "当前 · " : "";
+  const suffix = model === defaultModel ? " · 默认" : "";
+  return `${prefix}${model}${suffix}`;
 }
 
 function formatRecoveryStatus(status: ServiceState["recoveryStatus"]) {

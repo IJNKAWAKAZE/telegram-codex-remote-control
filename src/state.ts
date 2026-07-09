@@ -9,6 +9,7 @@ const sessionHistoryEntrySchema = z.object({
   id: z.string().min(1),
   threadId: z.string().min(1),
   cwd: z.string().min(1),
+  model: z.string().min(1).optional(),
   preview: z.string().min(1),
   createdAt: z.string(),
   lastUsedAt: z.string()
@@ -17,6 +18,7 @@ const sessionHistoryEntrySchema = z.object({
 const serviceStateSchema = z.object({
   threadId: z.string().nullable(),
   currentCwd: z.string().min(1),
+  currentModel: z.string().min(1).optional(),
   recoveryStatus: z.enum([
     "fresh",
     "resume-pending",
@@ -34,20 +36,24 @@ const serviceStateSchema = z.object({
   sessionHistory: z.array(sessionHistoryEntrySchema).default([])
 });
 
+type PersistedServiceState = z.infer<typeof serviceStateSchema>;
+
 export class FileStateStore {
   constructor(
     private readonly filePath: string,
-    private readonly defaultCwd: string
+    private readonly defaultCwd: string,
+    private readonly defaultModel: string
   ) {}
 
   async load(): Promise<ServiceState> {
     try {
       const raw = await readFile(this.filePath, "utf-8");
-      return serviceStateSchema.parse(JSON.parse(raw));
+      return normalizeLoadedState(serviceStateSchema.parse(JSON.parse(raw)), this.defaultCwd, this.defaultModel);
     } catch {
       return {
         threadId: null,
         currentCwd: this.defaultCwd,
+        currentModel: this.defaultModel,
         recoveryStatus: "fresh",
         activeRun: null,
         previousShutdownHadActiveTask: false,
@@ -67,6 +73,7 @@ export class FileStateStore {
       ...state,
       threadId: null,
       currentCwd,
+      currentModel: this.defaultModel,
       recoveryStatus: "fresh"
     });
   }
@@ -95,6 +102,7 @@ export class FileStateStore {
       id: createSessionHistoryId(),
       threadId: state.threadId,
       cwd: state.currentCwd,
+      model: state.currentModel,
       preview: normalizeSessionPreview(state.activeRun?.preview ?? fallbackPreview),
       createdAt: now,
       lastUsedAt: now
@@ -111,6 +119,7 @@ export class FileStateStore {
   async recordSession(input: {
     threadId: string;
     cwd: string;
+    model: string;
     preview: string;
   }) {
     const state = await this.load();
@@ -121,6 +130,7 @@ export class FileStateStore {
       ? {
           ...existing,
           cwd: input.cwd,
+          model: input.model,
           preview: normalizedPreview,
           lastUsedAt: now
         }
@@ -128,6 +138,7 @@ export class FileStateStore {
           id: createSessionHistoryId(),
           threadId: input.threadId,
           cwd: input.cwd,
+          model: input.model,
           preview: normalizedPreview,
           createdAt: now,
           lastUsedAt: now
@@ -167,6 +178,7 @@ export class FileStateStore {
       ...state,
       threadId: updatedEntry.threadId,
       currentCwd: updatedEntry.cwd,
+      currentModel: updatedEntry.model,
       recoveryStatus: "resume-pending",
       sessionHistory: trimSessionHistory([
         updatedEntry,
@@ -188,6 +200,7 @@ export class FileStateStore {
     await this.save({
       ...state,
       threadId: isCurrentSession ? null : state.threadId,
+      currentModel: isCurrentSession ? this.defaultModel : state.currentModel,
       recoveryStatus: isCurrentSession ? "fresh" : state.recoveryStatus,
       sessionHistory: state.sessionHistory.filter((entry) => entry.id !== sessionId)
     });
@@ -196,6 +209,26 @@ export class FileStateStore {
       entry: existing,
       isCurrentSession
     };
+  }
+
+  async switchModel(model: string) {
+    const state = await this.load();
+    const sessionHistory = state.threadId
+      ? state.sessionHistory.map((entry) =>
+          entry.threadId === state.threadId
+            ? {
+                ...entry,
+                model
+              }
+            : entry
+        )
+      : state.sessionHistory;
+
+    await this.save({
+      ...state,
+      currentModel: model,
+      sessionHistory
+    });
   }
 }
 
@@ -212,4 +245,30 @@ function trimSessionHistory(entries: SessionHistoryEntry[]) {
 
 function createSessionHistoryId() {
   return `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeLoadedState(
+  state: PersistedServiceState,
+  defaultCwd: string,
+  defaultModel: string
+): ServiceState {
+  const sessionHistory = trimSessionHistory(
+    state.sessionHistory.map((entry) => ({
+      ...entry,
+      model: entry.model ?? defaultModel
+    }))
+  );
+  const currentEntry = state.threadId
+    ? sessionHistory.find((entry) => entry.threadId === state.threadId) ?? null
+    : null;
+
+  return {
+    threadId: state.threadId,
+    currentCwd: state.currentCwd || defaultCwd,
+    currentModel: state.currentModel ?? currentEntry?.model ?? defaultModel,
+    recoveryStatus: state.recoveryStatus,
+    activeRun: state.activeRun,
+    previousShutdownHadActiveTask: state.previousShutdownHadActiveTask,
+    sessionHistory
+  };
 }

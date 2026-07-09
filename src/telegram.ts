@@ -203,7 +203,7 @@ function resolveExtension(mimeType: string | undefined) {
   return extname(basename(`x.${mimeType.split("/").at(-1) || "bin"}`));
 }
 
-const SUPPORTED_COMMANDS = new Set(["/status", "/pwd", "/cd", "/stop", "/new", "/reset", "/sessions"]);
+const SUPPORTED_COMMANDS = new Set(["/status", "/pwd", "/cd", "/model", "/stop", "/new", "/reset", "/sessions"]);
 
 function extractSupportedCommand(text: string) {
   const trimmed = text.trim();

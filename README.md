@@ -17,7 +17,7 @@
 - 自动监听当前工作目录下的 `.relay-out`，把新增或更新的文件回传到 Telegram
 - 保存 Codex 线程 ID 和当前工作目录，支持重启后继续已有会话
 - 保存最近 10 条历史会话，可在 Telegram 中通过按钮切换或删除
-- 提供 `/status`、`/pwd`、`/cd`、`/stop`、`/new`、`/sessions` 等控制命令
+- 提供 `/status`、`/pwd`、`/cd`、`/model`、`/stop`、`/new`、`/sessions` 等控制命令
 
 ## 工作方式
 
@@ -150,6 +150,7 @@ Copy-Item config/relay.config.example.json config/relay.config.json
       "supportsWebsockets": false
     },
     "model": "gpt-5.4",
+    "models": ["gpt-5.4", "gpt-5.4-mini"],
     "reasoningEffort": "medium",
     "approvalPolicy": "never",
     "sandboxMode": "danger-full-access",
@@ -164,12 +165,13 @@ Copy-Item config/relay.config.example.json config/relay.config.json
 - `defaultCwd`：默认工作目录。支持绝对路径，也支持相对 `appRoot` 的路径
 - `dataDir`：运行时数据目录
 - `tempDir`：附件暂存目录
-- `stateFile`：服务状态文件，保存当前目录和线程 ID
+- `stateFile`：服务状态文件，保存当前目录、线程 ID、当前会话模型和历史会话
 - `codexHome`：传给 Codex 进程的 `CODEX_HOME`
 - `telegram.pollTimeoutSeconds`：Telegram 长轮询超时
 - `codex.baseUrl`：可选，自定义 OpenAI 兼容接口地址；不填时使用官方默认地址
 - `codex.provider`：可选，只有在配置了 `baseUrl` 时才有意义，用于声明自定义 provider
-- `codex.model`：使用的模型名
+- `codex.model`：默认模型名；新会话会先回到这个默认值
+- `codex.models`：可选模型列表。服务启动后先使用 `codex.model` 作为当前会话默认值，你可以随时在 Telegram 中通过 `/model` 切换当前会话模型，并继续沿用当前会话上下文
 - `codex.reasoningEffort`：推理强度，可选值为 `minimal`、`low`、`medium`、`high`、`xhigh`
 - `codex.approvalPolicy`：审批策略
 - `codex.sandboxMode`：沙箱模式
@@ -485,14 +487,16 @@ release/<platform>/
 
 - `/status`：查看当前状态、工作目录、线程状态、模型和沙箱配置
 - `/pwd`：查看当前工作目录
-- `/cd <path>`：切换工作目录，并重置当前 Codex 线程
+- `/cd <path>`：切换工作目录，并重置当前 Codex 线程和当前会话模型
+- `/model`：显示模型按钮列表，切换当前会话模型，并继续沿用当前会话上下文
 - `/stop`：中止当前正在运行的任务
-- `/new`：清空当前线程，下一个任务会创建新会话
-- `/sessions`：显示最近 10 条历史会话，左侧按钮切换，右侧按钮删除
+- `/new`：清空当前线程，下一个任务会创建新会话并恢复默认模型
+- `/sessions`：显示最近 10 条历史会话；正文显示详细信息，按钮只保留编号，左侧切换，右侧删除
 
 `/sessions` 补充说明：
 
-- 按钮上显示的是“最近使用时间 + 目录名 + 文本摘要”，不会直接显示 thread ID
+- 正文里会显示“编号 + 最近使用时间 + 目录名 + 模型 + 文本摘要”
+- 按钮只显示编号，避免 Telegram 客户端把长按钮文本截断
 - 删除的是本地保存的历史会话记录；删除当前会话后，下一个任务会新建会话
 
 ### 产物回传规则

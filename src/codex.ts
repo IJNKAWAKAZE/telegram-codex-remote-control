@@ -46,11 +46,7 @@ export class CodexSessionManager {
 
   async resetThread() {
     const state = await this.stateStore.load();
-    await this.stateStore.save({
-      ...state,
-      threadId: null,
-      recoveryStatus: "fresh"
-    });
+    await this.stateStore.markFreshThread(state.currentCwd);
   }
 
   async changeDirectory(nextPath: string) {
@@ -60,12 +56,7 @@ export class CodexSessionManager {
       throw new Error(`路径不存在：${resolvedPath}`);
     }
 
-    await this.stateStore.save({
-      ...state,
-      currentCwd: resolvedPath,
-      threadId: null,
-      recoveryStatus: "fresh"
-    });
+    await this.stateStore.markFreshThread(resolvedPath);
 
     return resolvedPath;
   }
@@ -78,6 +69,7 @@ export class CodexSessionManager {
   }): Promise<RunResult> {
     const state = await this.stateStore.load();
     const threadOptions = buildThreadOptions(this.config, state, input.attachments, input.exportDir);
+    const selectedModel = state.currentModel;
 
     const attempt = async (mode: "resume" | "fresh") => {
       const thread =
@@ -116,6 +108,7 @@ export class CodexSessionManager {
             await this.stateStore.recordSession({
               threadId: currentThreadId,
               cwd: state.currentCwd,
+              model: selectedModel,
               preview: input.text
             });
           }
@@ -130,6 +123,7 @@ export class CodexSessionManager {
             await this.stateStore.recordSession({
               threadId: currentThreadId,
               cwd: state.currentCwd,
+              model: selectedModel,
               preview: input.text
             });
             recordedSession = true;
@@ -186,7 +180,7 @@ function buildThreadOptions(
 ): ThreadOptions {
   const attachmentDirectories = [...new Set(attachments.map((attachment) => dirname(attachment.path)))];
   return {
-    model: config.codex.model,
+    model: state.currentModel,
     modelReasoningEffort: config.codex.reasoningEffort,
     approvalPolicy: config.codex.approvalPolicy,
     sandboxMode: config.codex.sandboxMode,

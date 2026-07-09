@@ -17,6 +17,7 @@
       "supportsWebsockets": false
     },
     "model": "gpt-5.4",
+    "models": ["gpt-5.4", "gpt-5.4-mini"],
     "reasoningEffort": "medium",
     "approvalPolicy": "never",
     "sandboxMode": "danger-full-access",
