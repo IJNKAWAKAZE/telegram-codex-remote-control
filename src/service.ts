@@ -4,19 +4,26 @@ import { basename, resolve } from "node:path";
 import type { ChatAdapter, ChatInlineKeyboardMarkup, IncomingAttachment, RelayConfig, ServiceState, SessionHistoryEntry } from "./types.js";
 import { AttachmentStore } from "./attachments.js";
 import { CodexSessionManager } from "./codex.js";
-import { renderBodyChunks, renderRichBodyChunks, renderStatusMessage } from "./renderer.js";
+import {
+  renderBodyChunks,
+  renderRichBodyChunks,
+  renderStatusMessage,
+  renderStreamingBodyChunk,
+  splitStreamingBodyText
+} from "./renderer.js";
 import { FileStateStore, SESSION_HISTORY_LIMIT } from "./state.js";
 import { TelegramGateway } from "./telegram.js";
 
 const STATUS_HISTORY_LIMIT = 6;
 const COMMAND_HISTORY_LIMIT = 12;
 const TELEGRAM_TYPING_INTERVAL_MS = 4000;
-type BodyRenderMode = "html" | "rich";
+type BodyRenderMode = "html-live" | "html-final" | "rich";
 
 export class RemoteControlService {
   private readonly stateStore: FileStateStore;
   private readonly attachmentStore: AttachmentStore;
   private readonly codex: CodexSessionManager;
+  private activeTaskToken: symbol | null = null;
   readonly telegram: TelegramGateway;
 
   constructor(private readonly config: RelayConfig) {
@@ -66,24 +73,28 @@ export class RemoteControlService {
   }
 
   private async handleText(adapter: ChatAdapter, text: string) {
-    await this.runExclusive(adapter, text, []);
+    await this.runTaskGuarded(adapter, async () => {
+      await this.runExclusive(adapter, text, []);
+    });
   }
 
   private async handleAttachment(adapter: ChatAdapter, attachment: IncomingAttachment) {
-    const downloaded = await this.telegram.downloadAttachment(attachment.fileId);
-    const runId = createRunId();
-    const state = await this.stateStore.load();
-    const runDirs = await this.attachmentStore.createRunContext(state.currentCwd, runId);
-    const staged = await this.attachmentStore.stageAttachment({
-      inputDir: runDirs.inputDir,
-      attachment: {
-        ...attachment,
-        fileName: attachment.fileName || basename(downloaded.filePath)
-      },
-      bytes: downloaded.bytes
-    });
+    await this.runTaskGuarded(adapter, async () => {
+      const downloaded = await this.telegram.downloadAttachment(attachment.fileId);
+      const runId = createRunId();
+      const state = await this.stateStore.load();
+      const runDirs = await this.attachmentStore.createRunContext(state.currentCwd, runId);
+      const staged = await this.attachmentStore.stageAttachment({
+        inputDir: runDirs.inputDir,
+        attachment: {
+          ...attachment,
+          fileName: attachment.fileName || basename(downloaded.filePath)
+        },
+        bytes: downloaded.bytes
+      });
 
-    await this.runExclusive(adapter, attachment.caption, [staged], runDirs.exportDir, runId);
+      await this.runExclusive(adapter, attachment.caption, [staged], runDirs.exportDir, runId);
+    });
   }
 
   private async handleCommand(adapter: ChatAdapter, commandText: string) {
@@ -101,8 +112,7 @@ export class RemoteControlService {
         return;
       }
       case "/sessions": {
-        const state = await this.stateStore.load();
-        if (state.activeRun) {
+        if (this.isTaskBusy()) {
           await adapter.sendHtml("任务运行中，无法管理历史会话。");
           return;
         }
@@ -110,8 +120,12 @@ export class RemoteControlService {
         return;
       }
       case "/stop": {
-        if (!this.codex.isRunning()) {
+        if (!this.isTaskBusy()) {
           await adapter.sendHtml("当前没有正在运行的任务。");
+          return;
+        }
+        if (!this.codex.isRunning()) {
+          await adapter.sendHtml("任务正在启动或收尾，当前没有可中止的 Codex 执行。");
           return;
         }
         await this.codex.stopActiveTurn();
@@ -120,7 +134,7 @@ export class RemoteControlService {
       }
       case "/new":
       case "/reset": {
-        if (this.codex.isRunning()) {
+        if (this.isTaskBusy()) {
           await adapter.sendHtml("任务运行中，无法新建会话。");
           return;
         }
@@ -133,7 +147,7 @@ export class RemoteControlService {
           await adapter.sendHtml("用法：<code>/cd &lt;路径&gt;</code>");
           return;
         }
-        if (this.codex.isRunning()) {
+        if (this.isTaskBusy()) {
           await adapter.sendHtml("任务运行中，无法切换目录。");
           return;
         }
@@ -167,8 +181,7 @@ export class RemoteControlService {
       return;
     }
 
-    const state = await this.stateStore.load();
-    if (state.activeRun) {
+    if (this.isTaskBusy()) {
       await adapter.answerCallback("任务运行中，无法管理历史会话。");
       return;
     }
@@ -246,7 +259,7 @@ export class RemoteControlService {
 
   private async renderStatus() {
     const state = await this.stateStore.load();
-    const mode = state.activeRun ? "运行中" : "空闲";
+    const mode = this.isTaskBusy() || state.activeRun ? "运行中" : "空闲";
     const threadText = state.threadId ? state.threadId : "待创建新线程";
     return [
       `<b>状态</b>`,
@@ -300,6 +313,7 @@ export class RemoteControlService {
     const statusLines: string[] = [];
     const commandLines: string[] = [];
     let body = "";
+    let streamingBodySegments: string[] = [];
     let statusMessageId: number | null = null;
     let bodyMessageIds: number[] = [];
     let renderedStatus = "";
@@ -338,7 +352,7 @@ export class RemoteControlService {
       }
     };
 
-    const syncMessages = async (stateLabel: string, force = false, bodyMode: BodyRenderMode = "html") => {
+    const syncMessages = async (stateLabel: string, force = false, bodyMode: BodyRenderMode = "html-live") => {
       const now = Date.now();
       if (!force && now - lastSyncAt < 750) {
         return;
@@ -350,7 +364,12 @@ export class RemoteControlService {
         statusLines,
         commandLines
       });
-      const bodyChunks = bodyMode === "rich" ? renderRichBodyChunks(body) : renderBodyChunks(body);
+      const bodyChunks =
+        bodyMode === "rich"
+          ? renderRichBodyChunks(body)
+          : bodyMode === "html-final"
+            ? renderBodyChunks(body)
+            : streamingBodySegments.map((segment) => renderStreamingBodyChunk(segment));
       lastSyncAt = now;
 
       if (statusMessageId) {
@@ -406,6 +425,7 @@ export class RemoteControlService {
         onEvent: async (event) => {
           if (event.type === "text-delta") {
             body += event.delta;
+            streamingBodySegments = appendStreamingSegments(streamingBodySegments, event.delta);
           } else if (event.type === "command") {
             const summarizedCommand = summarizeCommand(event.command);
             if (commandLines.at(-1) !== summarizedCommand) {
@@ -434,7 +454,7 @@ export class RemoteControlService {
           await syncMessages("已完成", true, "rich");
         } catch (error) {
           console.error("[service] Failed to render rich Telegram output, falling back to HTML:", error);
-          await syncMessages("已完成", true);
+          await syncMessages("已完成", true, "html-final");
         }
       }
 
@@ -460,6 +480,32 @@ export class RemoteControlService {
         activeRun: null,
         previousShutdownHadActiveTask: false
       });
+    }
+  }
+
+  private isTaskBusy() {
+    return this.activeTaskToken !== null;
+  }
+
+  private async runTaskGuarded(adapter: ChatAdapter, task: () => Promise<void>) {
+    if (this.isTaskBusy()) {
+      await adapter.sendHtml("已有任务在运行，请先使用 <code>/stop</code>。");
+      return;
+    }
+
+    const token = Symbol("active-task");
+    this.activeTaskToken = token;
+
+    try {
+      await task();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("[service] Background task setup failed:", error);
+      await adapter.sendHtml(`执行失败：<code>${escapeHtml(message)}</code>`);
+    } finally {
+      if (this.activeTaskToken === token) {
+        this.activeTaskToken = null;
+      }
     }
   }
 
@@ -517,6 +563,22 @@ export class RemoteControlService {
       replyMarkup
     };
   }
+}
+
+function appendStreamingSegments(existingSegments: string[], delta: string) {
+  if (!delta) {
+    return existingSegments;
+  }
+
+  if (!existingSegments.length) {
+    return splitStreamingBodyText(delta);
+  }
+
+  const nextSegments = [...existingSegments];
+  const lastSegment = nextSegments.pop() ?? "";
+  const replacementSegments = splitStreamingBodyText(`${lastSegment}${delta}`);
+  nextSegments.push(...replacementSegments);
+  return nextSegments;
 }
 
 function createRunId() {

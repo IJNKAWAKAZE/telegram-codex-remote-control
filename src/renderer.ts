@@ -85,6 +85,50 @@ export function renderRichBodyChunks(markdown: string) {
   return chunks;
 }
 
+export function renderStreamingBodyChunk(text: string) {
+  return escapeHtml(text.replaceAll("\r\n", "\n"));
+}
+
+export function splitStreamingBodyText(text: string, maxLength = MAX_MESSAGE_LENGTH) {
+  if (!text) {
+    return [];
+  }
+
+  const chunks: string[] = [];
+  let chunk = "";
+
+  for (const piece of splitStreamingPieces(text.replaceAll("\r\n", "\n"))) {
+    const next = `${chunk}${piece}`;
+    if (renderStreamingBodyChunk(next).length <= maxLength) {
+      chunk = next;
+      continue;
+    }
+
+    if (chunk) {
+      chunks.push(chunk);
+      chunk = "";
+    }
+
+    if (renderStreamingBodyChunk(piece).length <= maxLength) {
+      chunk = piece;
+      continue;
+    }
+
+    let remaining = piece;
+    while (remaining) {
+      const splitAt = findRenderedTextSplitPoint(remaining, maxLength);
+      chunks.push(remaining.slice(0, splitAt));
+      remaining = remaining.slice(splitAt);
+    }
+  }
+
+  if (chunk) {
+    chunks.push(chunk);
+  }
+
+  return chunks;
+}
+
 function renderMarkdownBlocks(markdown: string) {
   const blocks: string[] = [];
   const lines = markdown.replaceAll("\r\n", "\n").split("\n");
@@ -119,7 +163,15 @@ function renderMarkdownBlocks(markdown: string) {
         quoteLines.push(lines[index]!.replace(/^\s*>\s?/, ""));
         index += 1;
       }
-      blocks.push(`<blockquote>${renderInline(quoteLines.join("\n")).replaceAll("\n", "<br>")}</blockquote>`);
+      blocks.push(
+        ...packHtmlLines(
+          quoteLines.map((quoteLine) => renderInline(quoteLine)),
+          MAX_MESSAGE_LENGTH,
+          "<blockquote>",
+          "</blockquote>",
+          "\n"
+        )
+      );
       continue;
     }
 
@@ -134,7 +186,7 @@ function renderMarkdownBlocks(markdown: string) {
     }
 
     if (paragraphLines.length) {
-      blocks.push(paragraphLines.join("\n"));
+      blocks.push(...packHtmlLines(paragraphLines, MAX_MESSAGE_LENGTH));
     }
   }
 
@@ -407,6 +459,63 @@ function renderCodeBlockChunks(code: string, language: string) {
   return chunks;
 }
 
+function splitStreamingPieces(text: string) {
+  const pieces: string[] = [];
+  const lines = text.split("\n");
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (index > 0) {
+      pieces.push("\n");
+    }
+    if (line) {
+      pieces.push(line);
+    }
+  }
+
+  return pieces.length ? pieces : [text];
+}
+
+function packHtmlLines(
+  lines: string[],
+  maxLength: number,
+  wrapperOpen = "",
+  wrapperClose = "",
+  separator = "\n"
+) {
+  const chunks: string[] = [];
+  const budget = Math.max(1, maxLength - wrapperOpen.length - wrapperClose.length);
+  let chunk = "";
+
+  for (const line of lines) {
+    const next = chunk ? `${chunk}${separator}${line}` : line;
+    if (wrapperOpen.length + next.length + wrapperClose.length <= maxLength) {
+      chunk = next;
+      continue;
+    }
+
+    if (chunk) {
+      chunks.push(`${wrapperOpen}${chunk}${wrapperClose}`);
+      chunk = "";
+    }
+
+    if (wrapperOpen.length + line.length + wrapperClose.length <= maxLength) {
+      chunk = line;
+      continue;
+    }
+
+    for (const piece of splitRenderedHtmlLine(line, budget)) {
+      chunks.push(`${wrapperOpen}${piece}${wrapperClose}`);
+    }
+  }
+
+  if (chunk || !chunks.length) {
+    chunks.push(`${wrapperOpen}${chunk}${wrapperClose}`);
+  }
+
+  return chunks;
+}
+
 function splitLongCodeLine(line: string, wrapperOpen: string, wrapperClose: string) {
   const chunks: string[] = [];
   const budget = Math.max(1, MAX_MESSAGE_LENGTH - wrapperOpen.length - wrapperClose.length);
@@ -419,6 +528,43 @@ function splitLongCodeLine(line: string, wrapperOpen: string, wrapperClose: stri
   }
 
   return chunks;
+}
+
+function splitRenderedHtmlLine(line: string, maxLength: number) {
+  const chunks: string[] = [];
+  let remaining = line;
+
+  while (remaining.length > maxLength) {
+    const splitAt = findSplitPoint(remaining, maxLength);
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt).trimStart();
+  }
+
+  if (remaining) {
+    chunks.push(remaining);
+  }
+
+  return chunks;
+}
+
+function findRenderedTextSplitPoint(value: string, maxLength: number) {
+  let low = 1;
+  let high = value.length;
+  let best = 1;
+
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const candidate = value.slice(0, mid);
+    if (renderStreamingBodyChunk(candidate).length <= maxLength) {
+      best = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  const preferred = findSplitPoint(value.slice(0, best), best);
+  return Math.max(1, preferred);
 }
 
 function pushPlaceholder(placeholders: string[], value: string) {

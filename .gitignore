@@ -10,3 +10,4 @@
 /docker/config/relay.config.json
 /docker/data/
 /docker/secrets/
+/data/

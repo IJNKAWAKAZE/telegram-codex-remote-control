@@ -58,12 +58,13 @@ export class TelegramGateway {
       }
 
       const adapter = createChatAdapter(ctx.api, ctx.chat.id);
-      if (ctx.message.text.startsWith("/")) {
-        await this.handlers.onCommand(adapter, ctx.message.text);
+      const commandText = extractSupportedCommand(ctx.message.text);
+      if (commandText) {
+        await this.handlers.onCommand(adapter, commandText);
         return;
       }
 
-      await this.handlers.onText(adapter, ctx.message.text);
+      this.runDetached("text message", () => this.handlers.onText(adapter, ctx.message.text));
     });
 
     this.bot.on("message:photo", async (ctx) => {
@@ -75,12 +76,14 @@ export class TelegramGateway {
       if (!photo) return;
 
       const adapter = createChatAdapter(ctx.api, ctx.chat.id);
-      await this.handlers.onAttachment(adapter, {
-        fileId: photo.file_id,
-        fileName: `photo-${photo.file_unique_id}.jpg`,
-        mimeType: "image/jpeg",
-        caption: ctx.message.caption ?? "请分析这张图片。"
-      });
+      this.runDetached("photo message", () =>
+        this.handlers.onAttachment(adapter, {
+          fileId: photo.file_id,
+          fileName: `photo-${photo.file_unique_id}.jpg`,
+          mimeType: "image/jpeg",
+          caption: ctx.message.caption ?? "请分析这张图片。"
+        })
+      );
     });
 
     this.bot.on("message:document", async (ctx) => {
@@ -90,12 +93,15 @@ export class TelegramGateway {
 
       const adapter = createChatAdapter(ctx.api, ctx.chat.id);
       const document = ctx.message.document;
-      await this.handlers.onAttachment(adapter, {
-        fileId: document.file_id,
-        fileName: document.file_name || `document-${document.file_unique_id}${resolveExtension(document.mime_type)}`,
-        mimeType: document.mime_type || "application/octet-stream",
-        caption: ctx.message.caption ?? "请检查这个文件。"
-      });
+      this.runDetached("document message", () =>
+        this.handlers.onAttachment(adapter, {
+          fileId: document.file_id,
+          fileName:
+            document.file_name || `document-${document.file_unique_id}${resolveExtension(document.mime_type)}`,
+          mimeType: document.mime_type || "application/octet-stream",
+          caption: ctx.message.caption ?? "请检查这个文件。"
+        })
+      );
     });
 
     this.bot.on("callback_query:data", async (ctx) => {
@@ -106,6 +112,12 @@ export class TelegramGateway {
 
       const adapter = createChatAdapter(ctx.api, ctx.chat.id, ctx.callbackQuery.id);
       await this.handlers.onCallback(adapter, ctx.callbackQuery.data, ctx.msgId ?? null);
+    });
+  }
+
+  private runDetached(label: string, task: () => Promise<void>) {
+    void task().catch((error) => {
+      console.error(`[telegram] Failed to handle ${label}:`, error);
     });
   }
 }
@@ -189,4 +201,21 @@ function resolveExtension(mimeType: string | undefined) {
   if (mimeType === "text/plain") return ".txt";
   if (mimeType === "application/pdf") return ".pdf";
   return extname(basename(`x.${mimeType.split("/").at(-1) || "bin"}`));
+}
+
+const SUPPORTED_COMMANDS = new Set(["/status", "/pwd", "/cd", "/stop", "/new", "/reset", "/sessions"]);
+
+function extractSupportedCommand(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("/")) {
+    return null;
+  }
+
+  const [firstToken, ...rest] = trimmed.split(/\s+/);
+  const normalizedCommand = firstToken.toLowerCase().replace(/@[^@\s]+$/, "");
+  if (!SUPPORTED_COMMANDS.has(normalizedCommand)) {
+    return null;
+  }
+
+  return [normalizedCommand, ...rest].join(" ").trim();
 }
