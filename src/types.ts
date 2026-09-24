@@ -1,6 +1,14 @@
 export type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 export type ApprovalPolicy = "never" | "on-request" | "on-failure" | "untrusted";
-export type ModelReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ModelReasoningEffort =
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max"
+  | "ultra"
+  | "persistent";
 export type CodexWireApi = "responses";
 export type CodexProviderConfig = {
   id?: string;

@@ -815,6 +815,12 @@ function formatReasoningEffort(reasoningEffort: RelayConfig["codex"]["reasoningE
       return "高（high）";
     case "xhigh":
       return "很高（xhigh）";
+    case "max":
+      return "最大（max）";
+    case "ultra":
+      return "极限（ultra）";
+    case "persistent":
+      return "持续（persistent）";
   }
 }
 

@@ -28,7 +28,9 @@ const fileConfigSchema = z.object({
       .optional(),
     model: z.string().min(1),
     models: z.array(z.string().min(1)).optional(),
-    reasoningEffort: z.enum(["minimal", "low", "medium", "high", "xhigh"]).optional(),
+    reasoningEffort: z
+      .enum(["minimal", "low", "medium", "high", "xhigh", "max", "ultra", "persistent"])
+      .optional(),
     approvalPolicy: z.enum(["never", "on-request", "on-failure", "untrusted"]),
     sandboxMode: z.enum(["read-only", "workspace-write", "danger-full-access"]),
     skipGitRepoCheck: z.boolean(),
@@ -154,7 +156,9 @@ function formatConfigError(error: ZodError) {
 
   const path = issue.path.join(".");
   if (path === "codex.reasoningEffort") {
-    return new Error("Invalid config: codex.reasoningEffort must be one of minimal|low|medium|high|xhigh");
+    return new Error(
+      "Invalid config: codex.reasoningEffort must be one of minimal|low|medium|high|xhigh|max|ultra|persistent"
+    );
   }
 
   if (path === "codex.baseUrl") {

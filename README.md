@@ -150,7 +150,7 @@ Copy-Item config/relay.config.example.json config/relay.config.json
       "supportsWebsockets": false
     },
     "model": "gpt-5.4",
-    "models": ["gpt-5.4", "gpt-5.4-mini"],
+    "models": ["gpt-5.4", "gpt-5.6-luna"],
     "reasoningEffort": "medium",
     "approvalPolicy": "never",
     "sandboxMode": "danger-full-access",
@@ -172,7 +172,7 @@ Copy-Item config/relay.config.example.json config/relay.config.json
 - `codex.provider`：可选，只有在配置了 `baseUrl` 时才有意义，用于声明自定义 provider
 - `codex.model`：默认模型名；新会话会先回到这个默认值
 - `codex.models`：可选模型列表。服务启动后先使用 `codex.model` 作为当前会话默认值，你可以随时在 Telegram 中通过 `/model` 切换当前会话模型，并继续沿用当前会话上下文
-- `codex.reasoningEffort`：推理强度，可选值为 `minimal`、`low`、`medium`、`high`、`xhigh`
+- `codex.reasoningEffort`：推理强度，可选值为 `minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`ultra`、`persistent`
 - `codex.approvalPolicy`：审批策略
 - `codex.sandboxMode`：沙箱模式
 - `codex.skipGitRepoCheck`：是否跳过 Git 仓库检查
